@@ -30,3 +30,4 @@ tests/
 docs/
 .gitignore
 ARCHITECTURE.md
+.agent/
