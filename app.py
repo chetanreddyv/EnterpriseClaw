@@ -42,6 +42,32 @@ checkpointer = None
 
 
 # ==========================================================
+# 0. Shared Logic
+# ==========================================================
+
+async def _handle_commands(chat_id: str, text: str, platform: str) -> bool:
+    """
+    Check for special commands (like /model) and handle them if found.
+    Returns True if a command was handled (and execution should stop).
+    """
+    if not text.startswith("/"):
+        return False
+
+    if text.startswith("/model "):
+        new_model = text.split(" ", 1)[1].strip()
+        await graph.aupdate_state(
+            {"configurable": {"thread_id": chat_id}},
+            {"active_model": new_model},
+        )
+        msg = f"🔄 Brain swapped! Now using: `{new_model}`"
+        await channel_manager.send_message(platform, chat_id, msg)
+        logger.info(f"  -> Model swapped for {chat_id} ({platform}): {new_model}")
+        return True
+
+    return False
+
+
+# ==========================================================
 # 1. Lifespan (startup / shutdown)
 # ==========================================================
 
@@ -157,18 +183,8 @@ async def _poll_telegram():
 
                 logger.info(f"📩 Message from {chat_id}: {text[:100]}")
 
-                # ── Hot-swap command: /model <provider/model> ───────────────
-                if text.startswith("/model "):
-                    new_model = text.split(" ", 1)[1].strip()
-                    await graph.aupdate_state(
-                        {"configurable": {"thread_id": str(chat_id)}},
-                        {"active_model": new_model},
-                    )
-                    await telegram_client.send_message(
-                        chat_id=chat_id,
-                        text=f"🔄 Brain swapped! Now using: `{new_model}`",
-                    )
-                    logger.info(f"  -> Model swapped for {chat_id}: {new_model}")
+                # ── Handle Commands (e.g. /model) ──────────────────────────
+                if await _handle_commands(str(chat_id), text, "telegram"):
                     continue
 
                 # Show typing indicator
@@ -269,19 +285,9 @@ async def webhook(request: Request):
 
         verify_chat_id(chat_id)
 
-        # ── Hot-swap command: /model <provider/model> ────────────────
-        if text.startswith("/model "):
-            new_model = text.split(" ", 1)[1].strip()
-            await graph.aupdate_state(
-                {"configurable": {"thread_id": str(chat_id)}},
-                {"active_model": new_model},
-            )
-            await telegram_client.send_message(
-                chat_id=chat_id,
-                text=f"🔄 Brain swapped! Now using: `{new_model}`",
-            )
-            logger.info(f"  -> Model swapped for {chat_id}: {new_model}")
-            return {"status": "model_swapped", "model": new_model}
+        # ── Handle Commands (e.g. /model) ────────────────────────────
+        if await _handle_commands(str(chat_id), text, "telegram"):
+            return {"status": "command_handled"}
 
         # Show typing indicator
         await telegram_client.send_typing_action(chat_id)
@@ -386,6 +392,10 @@ async def chat_endpoint(thread_id: str, request: Request):
         return JSONResponse({"error": "Empty message"}, status_code=400)
 
     logger.info(f"🌐 Gateway API request queued from {thread_id}: {user_input[:100]}")
+
+    # ── Handle Commands (e.g. /model) ────────────────────────────
+    if await _handle_commands(thread_id, user_input, "web"):
+        return {"status": "command_handled"}
 
     msg = IncomingMessageEvent(
         platform="web",
