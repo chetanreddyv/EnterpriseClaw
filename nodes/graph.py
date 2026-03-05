@@ -39,6 +39,9 @@ class AgentState(TypedDict):
     memory_context: Optional[str]             # Retrieved long-term context
     context_data: Optional[dict]              # Additional system properties
 
+    # ── Model ─────────────────────────────────────────────────
+    active_model: Optional[str]               # Active LLM for this thread (e.g. "google_genai/gemini-2.5-flash")
+
 
 # ==========================================================
 # 2. Conditional Routing
@@ -65,7 +68,7 @@ def route_after_agent(state: AgentState) -> str:
         return END
 
     # Dynamically get the dangerous write actions
-    _, write_actions, _ = _get_enabled_tools_and_write_actions()
+    _, write_actions = _get_enabled_tools_and_write_actions()
 
     # Check for dangerous tools requiring HITL
     for tool_call in last_message.tool_calls:

@@ -157,6 +157,20 @@ async def _poll_telegram():
 
                 logger.info(f"📩 Message from {chat_id}: {text[:100]}")
 
+                # ── Hot-swap command: /model <provider/model> ───────────────
+                if text.startswith("/model "):
+                    new_model = text.split(" ", 1)[1].strip()
+                    await graph.aupdate_state(
+                        {"configurable": {"thread_id": str(chat_id)}},
+                        {"active_model": new_model},
+                    )
+                    await telegram_client.send_message(
+                        chat_id=chat_id,
+                        text=f"🔄 Brain swapped! Now using: `{new_model}`",
+                    )
+                    logger.info(f"  -> Model swapped for {chat_id}: {new_model}")
+                    continue
+
                 # Show typing indicator
                 await telegram_client.send_typing_action(chat_id)
 
@@ -254,6 +268,20 @@ async def webhook(request: Request):
             return {"status": "ignored", "reason": "no chat_id or text"}
 
         verify_chat_id(chat_id)
+
+        # ── Hot-swap command: /model <provider/model> ────────────────
+        if text.startswith("/model "):
+            new_model = text.split(" ", 1)[1].strip()
+            await graph.aupdate_state(
+                {"configurable": {"thread_id": str(chat_id)}},
+                {"active_model": new_model},
+            )
+            await telegram_client.send_message(
+                chat_id=chat_id,
+                text=f"🔄 Brain swapped! Now using: `{new_model}`",
+            )
+            logger.info(f"  -> Model swapped for {chat_id}: {new_model}")
+            return {"status": "model_swapped", "model": new_model}
 
         # Show typing indicator
         await telegram_client.send_typing_action(chat_id)

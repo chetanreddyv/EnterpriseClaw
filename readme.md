@@ -25,9 +25,30 @@ EnterpriseClaw solves the "Orchestrator Clash" by splitting the brain from the b
 * **⏳ True LangGraph Subagents:** Advanced background operations. Instead of simple fire-and-forget scripts, EnterpriseClaw spawns ephemeral LangGraph execute loops for complex background research. When a subagent finishes, it securely injects its report directly into the primary thread's checkpointer state.
 * **👀 Background Process Monitoring:** When the agent executes a background shell command, it doesn't just blind-fire it. EnterpriseClaw attaches an async monitor to capture `stdout`/`stderr` and automatically notifies the primary agent thread the moment the process concludes.
 
+* **🔀 Model Agnosticism:** Swap the underlying LLM at runtime without touching code. Backed by LangChain's `init_chat_model` factory, each conversation thread stores its preferred model in the SQLite checkpointer — meaning different threads can run different providers simultaneously, and preferences survive restarts.
+
 ---
 
-## 🚀 Getting Started
+## 🔀 Model Agnosticism
+
+Send `/model <provider/model>` from **any channel** (Telegram or Web) to hot-swap the LLM for that specific conversation thread. The preference is persisted in SQLite — it survives restarts and is isolated per-thread.
+
+```
+/model google_genai/gemini-2.5-flash      # default
+/model openai/gpt-4o
+/model anthropic/claude-3-5-sonnet-20241022
+/model ollama/llama3                       # local, no API key needed
+```
+
+| Provider | Format | Required `.env` key |
+|---|---|---|
+| Google Gemini | `google_genai/<model>` | `GEMINI_API_KEY` |
+| OpenAI | `openai/<model>` | `OPENAI_API_KEY` |
+| Anthropic | `anthropic/<model>` | `ANTHROPIC_API_KEY` |
+| Ollama (local) | `ollama/<model>` | *(none — server must be running)* |
+| Any OpenAI-compat | `openai/<model>` + `OPENAI_BASE_URL` | `OPENAI_API_KEY` |
+
+> The agent automatically falls back to Gemini if the requested model fails to initialise.
 
 ### 1. Installation
 
@@ -49,7 +70,15 @@ cp .env.example .env
 
 ```
 
-Ensure you set your `GEMINI_API_KEY` (or preferred LLM provider) and `TELEGRAM_BOT_TOKEN` (if using the Telegram channel).
+Ensure you set at least one LLM API key and your `TELEGRAM_BOT_TOKEN` (if using the Telegram channel). Add keys for any providers you want to hot-swap into at runtime:
+
+```bash
+# Required — at least one of these:
+GEMINI_API_KEY=...        # Google Gemini (default)
+OPENAI_API_KEY=...        # OpenAI (optional)
+ANTHROPIC_API_KEY=...     # Anthropic Claude (optional)
+# Ollama: no key needed, just run the server locally
+```
 
 ### 3. Start the Engine
 

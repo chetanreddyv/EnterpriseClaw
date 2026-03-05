@@ -8,7 +8,7 @@ and executes the agent via LangChain.
 import json
 import logging
 from pathlib import Path
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.chat_models import init_chat_model
 from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
@@ -148,9 +148,27 @@ async def agent_node(state: dict) -> dict:
         # In LangChain, tools can be raw functions. `bind_tools` converts them.
         all_tools.append(real_func)
 
-    # ── Create agent LLM ────────────────────────────────────────────────
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
-    
+    # ── Create agent LLM (model-agnostic) ──────────────────────────────
+    # Default to Gemini; override per-thread via the /model command.
+    # Format: "provider/model"  e.g. "google_genai/gemini-2.5-flash"
+    #                                 "anthropic/claude-3-5-sonnet-20241022"
+    #                                 "openai/gpt-4o"
+    #                                 "ollama/llama3"  (local)
+    _DEFAULT_MODEL = "google_genai/gemini-2.5-flash"
+    model_string = state.get("active_model") or _DEFAULT_MODEL
+
+    provider, actual_model = (
+        model_string.split("/", 1) if "/" in model_string
+        else (None, model_string)
+    )
+
+    try:
+        llm = init_chat_model(actual_model, model_provider=provider)
+        logger.info(f"  -> LLM loaded: {model_string}")
+    except Exception as e:
+        logger.error(f"  -> Failed to load '{model_string}', falling back to Gemini. Error: {e}")
+        llm = init_chat_model("gemini-2.5-flash", model_provider="google_genai")
+
     # Bind tools
     llm_with_tools = llm.bind_tools(all_tools) if all_tools else llm
 
