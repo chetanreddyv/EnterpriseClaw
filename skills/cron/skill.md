@@ -1,6 +1,7 @@
 ---
 name: cron
 description: Schedule reminders and recurring tasks.
+tools: cron_add, cron_list, cron_remove
 ---
 
 # Cron
