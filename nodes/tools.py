@@ -20,7 +20,8 @@ def _get_tool_registry() -> dict:
 
 import inspect
 
-async def _execute_tool_func(action_name: str, tool_args: dict, config: dict) -> str:
+async def _execute_tool_func(action_name: str, tool_args: dict, config: dict):
+    """Execute a tool and return result. Supports multimodal returns (list of content blocks)."""
     registry = _get_tool_registry()
     func = registry.get(action_name)
     if not func:
@@ -35,6 +36,9 @@ async def _execute_tool_func(action_name: str, tool_args: dict, config: dict) ->
             if inspect.isawaitable(result):
                 result = await result
         logger.info(f"  -> {action_name} completed successfully")
+        # Allow multimodal returns (list of content blocks) to pass through
+        if isinstance(result, list):
+            return result
         return str(result)
     except Exception as e:
         logger.error(f"  -> {action_name} failed: {e}")
@@ -65,7 +69,7 @@ async def execute_tools_node(state: dict) -> dict:
         tool_args = tool_call["args"]
         call_id = tool_call["id"]
         
-        result_str = await _execute_tool_func(action_name, tool_args, config)
-        tool_messages.append(ToolMessage(content=result_str, tool_call_id=call_id))
+        result = await _execute_tool_func(action_name, tool_args, config)
+        tool_messages.append(ToolMessage(content=result, tool_call_id=call_id))
         
     return {"messages": tool_messages}

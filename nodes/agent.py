@@ -56,8 +56,8 @@ def _get_enabled_tools_and_write_actions() -> tuple[list[str], set[str]]:
     Auto-loads from SKILL.md files.
     """
     # 0. The Standard Library (Core Capabilities available to all skills)
-    enabled_tools = {"exec_command", "web_search", "web_fetch", "delegate_research"}
-    write_actions = {"exec_command", "browser_click", "browser_type", "browser_execute_js"} # Always protect dangerous tools
+    enabled_tools = {"exec_command", "web_search", "web_fetch", "delegate_task"}
+    write_actions = {"exec_command"} # Only shell commands require HITL — browser tools run autonomously
     
     # 1. Universal Auto-Loader: Scan all skill.md files
     # Case-insensitive match for skill.md or SKILL.md
@@ -120,6 +120,7 @@ async def agent_node(state: dict) -> dict:
         if memory_context != "No established context.":
             logger.info(f"  -> Successfully retrieved memory context ({len(memory_context)} chars)")
         skill_prompts = await memorygate.get_relevant_skills(user_input)
+        logger.info(f"  -> Skill prompts loaded ({len(skill_prompts)} chars): {skill_prompts[:200]}...")
     except Exception as e:
         logger.warning(f"  -> Context/Skill retrieval skipped/failed: {e}")
 

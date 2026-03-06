@@ -428,7 +428,7 @@ class ZvecMemoryStore:
             return ""
         return "\n".join(f"- [{item['kind']}] {item['text']}" for item in items)
 
-    async def get_relevant_skills(self, query: str, top_k: int = 2, threshold: float = 0.75) -> str:
+    async def get_relevant_skills(self, query: str, top_k: int = 2, threshold: float = 0.65) -> str:
         """Search Zvec for skills relevant to the query. Only returns skills above score threshold."""
         if not self.skill_collection:
             return ""
@@ -466,8 +466,17 @@ class ZvecMemoryStore:
                 
             prompts = []
             for skill_name in skill_names:
-                skill_file = SKILLS_DIR / skill_name / "skill.md"
-                if skill_file.exists():
+                skill_dir = SKILLS_DIR / skill_name
+                skill_file = None
+                
+                # Case-insensitive search for skill.md
+                if skill_dir.exists():
+                    for f in skill_dir.iterdir():
+                        if f.name.lower() == "skill.md":
+                            skill_file = f
+                            break
+                            
+                if skill_file and skill_file.exists():
                     content = skill_file.read_text()
                     prompts.append(f"## {skill_name.replace('_', ' ').title()}\n{content}")
                     logger.info(f"  -> Retrieving dynamic skill prompt: {skill_file.name}")
@@ -616,8 +625,11 @@ class ZvecMemoryStore:
         skills_to_embed = []
         skill_ids = []
 
-        # Load all .md files
-        for skill_file in SKILLS_DIR.glob("*/skill.md"):
+        # Load all .md files (case-insensitive for skill.md)
+        for skill_file in SKILLS_DIR.rglob("*"):
+            if skill_file.name.lower() != "skill.md":
+                continue
+                
             skill_id = skill_file.parent.name
             if skill_id == "identity":
                 continue # identity is loaded separately into the system prompt

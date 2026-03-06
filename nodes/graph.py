@@ -42,6 +42,9 @@ class AgentState(TypedDict):
     # ── Model ─────────────────────────────────────────────────
     active_model: Optional[str]               # Active LLM for this thread (e.g. "google_genai/gemini-2.5-flash")
 
+    # ── Sub-Agent ─────────────────────────────────────────────
+    action_count: Optional[int]               # Tool call counter for sub-agent max_actions limit
+
 
 # ==========================================================
 # 2. Conditional Routing
