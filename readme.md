@@ -27,7 +27,36 @@ EnterpriseClaw solves the "Orchestrator Clash" by splitting the brain from the b
 
 * **🔀 Model Agnosticism:** Swap the underlying LLM at runtime without touching code. Backed by LangChain's `init_chat_model` factory, each conversation thread stores its preferred model in the SQLite checkpointer — meaning different threads can run different providers simultaneously, and preferences survive restarts.
 
+* **🌐 Browser Use:** Control a real Chromium browser via Playwright. Navigate websites, click buttons, fill forms, take screenshots, and extract content — all with HITL safeguards on interaction tools. Each thread gets an isolated browser session with separate cookies and storage.
+
 ---
+
+## 🌐 Browser Use
+
+EnterpriseClaw can control a **real headless Chromium browser** for tasks that require interaction beyond simple HTTP fetching — logging into dashboards, filling forms, clicking through multi-step flows, or scraping JavaScript-rendered content.
+
+### Setup
+
+After installing dependencies, download the Chromium binary (one-time):
+
+```bash
+playwright install chromium
+```
+
+### Tools
+
+| Tool | Safety | Description |
+|---|---|---|
+| `browser_navigate(url)` | ✅ Read | Navigate to a URL, returns page title and text |
+| `browser_get_text()` | ✅ Read | Extract visible text from the current page |
+| `browser_screenshot()` | ✅ Read | Save screenshot to `./data/screenshots/` |
+| `browser_click(selector)` | 🔐 HITL | Click an element by CSS selector or visible text |
+| `browser_type(selector, text)` | 🔐 HITL | Type text into an input field |
+| `browser_execute_js(script)` | 🔐 HITL | Run JavaScript on the page |
+
+> Interaction tools (`click`, `type`, `execute_js`) pause for human approval before executing, exactly like `exec_command`. Browser contexts are isolated per conversation thread, and idle sessions are automatically garbage-collected after 30 minutes.
+
+
 
 ## 🔀 Model Agnosticism
 

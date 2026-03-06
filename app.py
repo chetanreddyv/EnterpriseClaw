@@ -133,6 +133,12 @@ async def lifespan(app: FastAPI):
         polling_task.cancel()
         await telegram_client.close()
         try:
+            from mcp_servers.browser_tools import BrowserSessionManager
+            await BrowserSessionManager.shutdown()
+            logger.info("✅ Browser sessions closed")
+        except Exception as e:
+            logger.error(f"❌ Error closing browser sessions: {e}")
+        try:
             from memory import memorygate
             await memorygate.store.close()
             logger.info("✅ Zvec memory stores flushed and closed")

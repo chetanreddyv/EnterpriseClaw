@@ -57,7 +57,7 @@ def _get_enabled_tools_and_write_actions() -> tuple[list[str], set[str]]:
     """
     # 0. The Standard Library (Core Capabilities available to all skills)
     enabled_tools = {"exec_command", "web_search", "web_fetch", "delegate_research"}
-    write_actions = {"exec_command"} # Always protect dangerous core tools
+    write_actions = {"exec_command", "browser_click", "browser_type", "browser_execute_js"} # Always protect dangerous tools
     
     # 1. Universal Auto-Loader: Scan all skill.md files
     # Case-insensitive match for skill.md or SKILL.md
