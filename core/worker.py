@@ -3,6 +3,7 @@ import asyncio
 
 from core.messaging import IncomingMessageEvent, ResumeEvent, SystemEvent
 from core.channel_manager import channel_manager
+from langgraph.types import Command
 
 logger = logging.getLogger("core.worker")
 
