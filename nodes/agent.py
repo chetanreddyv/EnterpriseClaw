@@ -8,8 +8,8 @@ and executes the agent via LangChain.
 import json
 import logging
 from pathlib import Path
-from langchain.chat_models import init_chat_model
 from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
+from core.llm import init_agent_llm
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +56,17 @@ def _get_enabled_tools_and_write_actions() -> tuple[list[str], set[str]]:
     Auto-loads from SKILL.md files.
     """
     # 0. The Standard Library (Core Capabilities available to all skills)
-    enabled_tools = {"exec_command", "web_search", "web_fetch", "delegate_task"}
-    write_actions = {"exec_command"} # Only shell commands require HITL — browser tools run autonomously
+    # We remove delegate_task and let the agent browse autonomously
+    enabled_tools = {"exec_command", "web_search", "web_fetch", "check_current_time", "schedule_reminder", "save_to_long_term_memory"}
+    
+    # Tiered Autonomy: Only OS-level destructive and active browsing actions require HITL
+    dangerous_actions = {
+        "exec_command", "write_file", "delete_file",
+        "browser_click", "browser_type", "browser_execute_js", 
+        "browser_select_option", "browser_press_key", "browser_hover", 
+        "browser_handle_dialog", "browser_file_upload"
+    }
+    write_actions = set(dangerous_actions)
     
     # 1. Universal Auto-Loader: Scan all skill.md files
     # Case-insensitive match for skill.md or SKILL.md
@@ -87,8 +96,8 @@ def _get_enabled_tools_and_write_actions() -> tuple[list[str], set[str]]:
         for action in requested_tools:
             enabled_tools.add(action)
             
-            # Safety Fallback: Automatically treat 'exec_command' as a write action requiring HITL
-            if action in ["exec_command", "write_file", "delete_file"]:
+            # Safety Fallback: Automatically treat dangerous actions as requiring HITL
+            if action in dangerous_actions:
                 write_actions.add(action)
 
     return list(enabled_tools), write_actions
@@ -115,7 +124,7 @@ async def agent_node(state: dict) -> dict:
     skill_prompts = "You are a helpful personal assistant. Be concise and accurate."
     thread_id = state.get("chat_id", "default_thread")
     try:
-        from memory import memorygate
+        from memory.gate import memorygate
         memory_context = await memorygate.get_context(thread_id=thread_id)
         if memory_context != "No established context.":
             logger.info(f"  -> Successfully retrieved memory context ({len(memory_context)} chars)")
@@ -131,6 +140,16 @@ async def agent_node(state: dict) -> dict:
     if memory_context:
         prompt_parts.append(f"## User Context (from long-term memory)\\n{memory_context}")
     prompt_parts.append(skill_prompts)
+    
+    # ── Inject Active Memory Control ──────────────────────────────
+    active_memory_prompt = (
+        "## Active Memory & Temporal Awareness\n"
+        "You have direct control over your long-term memory and schedule.\n"
+        "- If you learn an important fact, preference, or rule about the user, ALWAYS use the `save_to_long_term_memory` tool to remember it permanently.\n"
+        "- If you need to perform actions in the future (e.g., 'remind me tonight', 'check email in 1 hour'), use the `schedule_reminder` tool.\n"
+        "- If you need to orient yourself chronologically, use the `check_current_time` tool."
+    )
+    prompt_parts.append(active_memory_prompt)
     
     # We append extra formatting rules if we want
     full_system_prompt = "\\n\\n---\\n\\n".join(prompt_parts) + "\\n\\nALWAYS format your output using standard Markdown (use *, _, `, ```, lists). Do NOT use HTML tags. Respond directly to the user."
@@ -149,26 +168,7 @@ async def agent_node(state: dict) -> dict:
         # In LangChain, tools can be raw functions. `bind_tools` converts them.
         all_tools.append(real_func)
 
-    # ── Create agent LLM (model-agnostic) ──────────────────────────────
-    # Default to Gemini; override per-thread via the /model command.
-    # Format: "provider/model"  e.g. "google_genai/gemini-2.5-flash"
-    #                                 "anthropic/claude-3-5-sonnet-20241022"
-    #                                 "openai/gpt-4o"
-    #                                 "ollama/llama3"  (local)
-    _DEFAULT_MODEL = "google_genai/gemini-2.5-flash"
-    model_string = state.get("active_model") or _DEFAULT_MODEL
-
-    provider, actual_model = (
-        model_string.split("/", 1) if "/" in model_string
-        else (None, model_string)
-    )
-
-    try:
-        llm = init_chat_model(actual_model, model_provider=provider)
-        logger.info(f"  -> LLM loaded: {model_string}")
-    except Exception as e:
-        logger.error(f"  -> Failed to load '{model_string}', falling back to Gemini. Error: {e}")
-        llm = init_chat_model("gemini-2.5-flash", model_provider="google_genai")
+    llm = init_agent_llm(state.get("active_model"))
 
     # Bind tools
     llm_with_tools = llm.bind_tools(all_tools) if all_tools else llm

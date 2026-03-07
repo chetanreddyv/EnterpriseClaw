@@ -1,6 +1,6 @@
 ---
 name: web_tools
-description: Search the web for up-to-date information, news, and fetch web page contents.
+description: Search the web for up-to-date information, news, and fetch web page contents. Use this first for quick information.
 tools: web_search, web_fetch
 ---
 

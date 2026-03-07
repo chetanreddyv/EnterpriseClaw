@@ -55,7 +55,7 @@ async def human_approval_node(state: dict) -> dict:
         # Actually, if approved, we want the graph to continue to `execute_tools`.
         # We can communicate this via a simple state update, or just return nothing since the edge will route it.
         # Wait, the edge from human_approval_node should be conditional!
-        return {"pending_action": None, "approval_status": "approved"}
+        return {"approval_status": "approved"}
 
     elif isinstance(decision, str) and decision.startswith("edit:"):
         edit_instruction = decision[5:].strip()

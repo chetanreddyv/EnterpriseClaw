@@ -34,16 +34,14 @@ class AgentState(TypedDict):
     agent_response: Optional[str]             # Final response text
     tool_failure_count: int                   # Self-correction counter
     approval_status: Optional[str]            # Track hitl output
+    _retry: Optional[bool]                    # Self-correction retry flag (used by router)
 
     # ── Memory ────────────────────────────────────────────────
     memory_context: Optional[str]             # Retrieved long-term context
     context_data: Optional[dict]              # Additional system properties
 
     # ── Model ─────────────────────────────────────────────────
-    active_model: Optional[str]               # Active LLM for this thread (e.g. "google_genai/gemini-2.5-flash")
-
-    # ── Sub-Agent ─────────────────────────────────────────────
-    action_count: Optional[int]               # Tool call counter for sub-agent max_actions limit
+    active_model: Optional[str]               # Active LLM for this thread (e.g. "google_genai/gemini-3-flash-preview")
 
 
 # ==========================================================

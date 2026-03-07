@@ -59,8 +59,24 @@ class BrowserSessionManager:
             # Default to visible browser unless explicitly set to headless
             is_headless = os.environ.get("BROWSER_HEADLESS", "false").lower() == "true"
             
-            cls._browser = await cls._playwright.chromium.launch(headless=is_headless)
-            logger.info(f"🌐 Playwright Chromium launched (headless={is_headless})")
+            USER_DATA_DIR = "./data/browser_profile"
+            os.makedirs(USER_DATA_DIR, exist_ok=True)
+            
+            # This launches Chrome and saves all cookies/logins to the folder
+            cls._browser = await cls._playwright.chromium.launch_persistent_context(
+                user_data_dir=USER_DATA_DIR,
+                headless=is_headless,
+                channel="chrome", # Optional: uses your actual installed Chrome browser
+                viewport={"width": 1280, "height": 720},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                # Anti-detection flags to allow Google SSO logins
+                ignore_default_args=["--enable-automation"],
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            )
+            # Auto-handle dialogs (accept by default) unless explicitly managed
+            cls._browser.on("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
+            
+            logger.info(f"🌐 Playwright Chromium launched with persistent context (headless={is_headless})")
 
             # Start GC sweep
             if cls._gc_task is None:
@@ -77,22 +93,21 @@ class BrowserSessionManager:
                 entry["last_accessed"] = time.time()
                 return entry["pages"][entry["active_page_idx"]]
 
-            # Create isolated context + page
-            context = await cls._browser.new_context(
-                viewport={"width": 1280, "height": 720},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            )
-            # Auto-handle dialogs (accept by default) unless explicitly managed
-            context.on("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
+            # Create a new page within the shared persistent context
+            # The first page is created automatically by launch_persistent_context
+            if not getattr(cls, "_default_page_used", False) and cls._browser.pages:
+                page = cls._browser.pages[0]
+                cls._default_page_used = True
+            else:
+                page = await cls._browser.new_page()
 
-            page = await context.new_page()
             cls._contexts[thread_id] = {
-                "context": context,
+                "context": cls._browser,
                 "pages": [page],
                 "active_page_idx": 0,
                 "last_accessed": time.time(),
             }
-            logger.info(f"🌐 New browser context created for thread {thread_id}")
+            logger.info(f"🌐 New browser page created for thread {thread_id}")
             return page
 
     @classmethod
@@ -108,10 +123,11 @@ class BrowserSessionManager:
             entry = cls._contexts.pop(thread_id, None)
             if entry:
                 try:
-                    await entry["context"].close()
-                    logger.info(f"🌐 Browser context closed for thread {thread_id}")
+                    for p in entry["pages"]:
+                        await p.close()
+                    logger.info(f"🌐 Browser pages closed for thread {thread_id}")
                 except Exception as e:
-                    logger.warning(f"Error closing context {thread_id}: {e}")
+                    logger.warning(f"Error closing pages {thread_id}: {e}")
 
     @classmethod
     async def shutdown(cls):
@@ -129,6 +145,7 @@ class BrowserSessionManager:
         if cls._playwright:
             await cls._playwright.stop()
             cls._playwright = None
+        cls._default_page_used = False
         logger.info("🌐 Playwright shut down cleanly")
 
     @classmethod

@@ -5,7 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
-
+skills/user_profile/skill.md
 # Virtual environments
 .venv
 
@@ -26,9 +26,11 @@ data/
 
 # Google OAuth tokens
 credentials.json
-tests/
+
 docs/
 .gitignore
 ARCHITECTURE.md
 .agent/
 skills/job_application/skill.md
+
+tests/

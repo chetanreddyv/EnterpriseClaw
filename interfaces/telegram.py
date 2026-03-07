@@ -48,7 +48,12 @@ class TelegramClient(ClientInterface):
 
     async def send_message(self, thread_id: str, content: str) -> None:
         """Pushes a standard text message to the client (Telegram chat)."""
-        await self._send_telegram_message(int(thread_id), content, parse_mode="HTML")
+        try:
+            chat_id = int(thread_id)
+        except (ValueError, TypeError):
+            logger.warning(f"Cannot send to non-numeric thread_id '{thread_id}' via Telegram, skipping.")
+            return
+        await self._send_telegram_message(chat_id, content, parse_mode="HTML")
 
     async def request_approval(self, thread_id: str, tool_name: str, args: Dict[str, Any]) -> None:
         """Pushes an interactive approval request (UI buttons) to the client."""

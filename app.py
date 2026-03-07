@@ -20,10 +20,8 @@ from langgraph.types import Command
 from config.settings import settings
 from interfaces.telegram import TelegramClient
 from nodes.graph import build_graph, checkpointer_context
-from core.lane_manager import lane_manager
-from core.messaging import IncomingMessageEvent, ResumeEvent
 from core.channel_manager import channel_manager
-import core.worker as worker
+from core.llm import extract_response
 
 # ── Logging ──────────────────────────────────────────────────
 logging.basicConfig(
@@ -96,13 +94,13 @@ async def lifespan(app: FastAPI):
     channel_manager.register_client("web", web_client)
     logger.info("✅ Web client registered")
 
-    # Initialize MemoryGate
+    # Initialize MemoryRetrieval
     try:
-        from memory import memorygate
-        await memorygate.initialize()
-        logger.info("✅ MemoryGate initialized")
+        from memory.retrieval import memory_retrieval
+        await memory_retrieval.initialize()
+        logger.info("✅ MemoryRetrieval initialized")
     except Exception as e:
-        logger.error(f"❌ Failed to initialize MemoryGate: {e}")
+        logger.error(f"❌ Failed to initialize MemoryRetrieval: {e}")
 
     logger.info(f"✅ Allowed chat IDs: {settings.allowed_chat_id_list}")
 
@@ -112,10 +110,9 @@ async def lifespan(app: FastAPI):
         graph = build_graph(checkpointer=checkpointer)
         logger.info("✅ LangGraph compiled with SQLite checkpointer")
 
-        # Start Cron Manager
-        from core.cron_manager import cron_manager
-        await cron_manager.start()
-        logger.info("✅ Cron scheduler started")
+        # Start Heartbeat Daemon
+        heartbeat_task = asyncio.create_task(system_heartbeat())
+        logger.info("💓 System Heartbeat loop started")
 
         # Delete any existing webhook and start polling for local dev
         await telegram_client.delete_webhook()
@@ -129,7 +126,7 @@ async def lifespan(app: FastAPI):
 
         # Shutdown
         logger.info("🔴 Shutting down...")
-        await cron_manager.stop()
+        heartbeat_task.cancel()
         polling_task.cancel()
         await telegram_client.close()
         try:
@@ -139,8 +136,8 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"❌ Error closing browser sessions: {e}")
         try:
-            from memory import memorygate
-            await memorygate.store.close()
+            from memory.retrieval import memory_retrieval
+            await memory_retrieval.store.close()
             logger.info("✅ Zvec memory stores flushed and closed")
         except Exception as e:
             logger.error(f"❌ Error closing memory stores: {e}")
@@ -150,8 +147,154 @@ async def lifespan(app: FastAPI):
 
 
 
+async def system_heartbeat():
+    """
+    Background pulse: Wakes up the agent every 15 minutes to perform any time-based tasks.
+    It checks for reminders or scheduled tasks via its internal tools.
+    """
+    pulse_delay = 900  # 15 minutes
+    logger.info(f"💓 Heartbeat daemon initialized. Pulse every {pulse_delay}s.")
+    
+    # Wait initially to allow startup to finish
+    await asyncio.sleep(10)
+    
+    while True:
+        try:
+            await asyncio.sleep(pulse_delay)
+            logger.info("💓 Sending System Heartbeat to Agent...")
+            
+            # The system thread ID
+            thread_id = "system_cron_thread"
+            
+            # Inject a silent trigger into the graph using direct_agent_invoke
+            await direct_agent_invoke(
+                chat_id=thread_id,
+                text="[SYSTEM EVENT: HEARTBEAT. Check your schedule, read unread emails, and perform any necessary background tasks. If nothing needs doing, reply 'IDLE'.]",
+                platform="system"
+            )
+
+        except asyncio.CancelledError:
+            logger.info("💓 Heartbeat daemon stopped")
+            break
+        except Exception as e:
+            logger.error(f"💓 Heartbeat error: {e}", exc_info=True)
+
+
 # ==========================================================
-# 2. Telegram Polling (for local dev)
+# 2. Direct Graph Executions (Replacing worker.py / lane_manager queues)
+# ==========================================================
+
+async def direct_agent_invoke(chat_id: str, text: str, platform: str) -> dict:
+    """Invokes the LangGraph state machine directly from a webhook route."""
+    from memory.retrieval import memory_retrieval
+    
+    config = {"configurable": {"thread_id": str(chat_id), "platform": platform}}
+
+    try:
+        async for graph_event in graph.astream(
+            {
+                "chat_id": str(chat_id),
+                "user_input": text,
+                "tool_failure_count": 0,
+            },
+            config=config,
+            stream_mode="updates",
+        ):
+            logger.debug(f"Graph event ({platform}): {graph_event}")
+
+        state = await graph.aget_state(config)
+
+        if state.next:
+            interrupted = state.tasks[0].interrupts[0].value
+            tool_args = interrupted.get("tool_args", {})
+            
+            # Request explicit HITL approval for dangerous tools
+            await channel_manager.request_approval(
+                platform=platform,
+                thread_id=str(chat_id),
+                tool_name=interrupted.get('action', 'unknown'),
+                args=tool_args
+            )
+            logger.info(f"🔐 HITL: Sent approval request to {platform} user {chat_id}")
+            
+            return {
+                "approval_required": True,
+                "action": interrupted.get("action", "unknown"),
+            }
+        else:
+            response = extract_response(state.values)
+
+            # Prevent chatbot spam for background/internal silent responses
+            if platform != "system" and response.strip() != "HEARTBEAT_OK" and response != "Done!" and response != "IDLE":
+                await channel_manager.send_message(
+                    platform=platform,
+                    thread_id=str(chat_id),
+                    content=response
+                )
+                logger.info(f"💬 Sent response to {platform} user {chat_id}")
+            elif response.strip() == "HEARTBEAT_OK" or response == "IDLE":
+                logger.info(f"🔇 Suppressed internal heartbeat string from {platform} thread {chat_id}")
+
+            # 1. Fast History Write ONLY. Semantic extraction is now governed directly by the agent via `@tool`.
+            await memory_retrieval.db.add_history(str(chat_id), "user", text)
+            await memory_retrieval.db.add_history(str(chat_id), "assistant", response)
+            
+            return {"response": response}
+
+    except Exception as e:
+        logger.error(f"❌ Graph execution error ({platform}): {e}", exc_info=True)
+        error_text = f"❌ Sorry, I encountered an error:\n{str(e)[:500]}"
+        if platform != "system":
+            try:
+                await channel_manager.send_message(platform, str(chat_id), error_text)
+            except Exception:
+                logger.critical(f"FATAL: Channel manager failed to deliver error for thread {chat_id}")
+        return {"error": str(e)[:500]}
+
+
+async def direct_resume_invoke(chat_id: str, decision: str, platform: str) -> dict:
+    """Resumes the LangGraph state machine after a HITL approval."""
+    from memory.retrieval import memory_retrieval
+    config = {"configurable": {"thread_id": str(chat_id), "platform": platform}}
+    
+    try:
+        async for graph_event in graph.astream(
+            Command(resume=decision),
+            config=config,
+            stream_mode="updates",
+        ):
+            logger.debug(f"Resume event ({platform}): {graph_event}")
+
+        state = await graph.aget_state(config)
+        if not state.next:
+            response = extract_response(state.values)
+
+            await channel_manager.send_message(platform, str(chat_id), response)
+            
+            # Fast history write after resumption
+            await memory_retrieval.db.add_history(str(chat_id), "assistant", response)
+            
+            return {"response": response}
+        else:
+            interrupted = state.tasks[0].interrupts[0].value
+            tool_args = interrupted.get("tool_args", {})
+            # Loopback HITL
+            await channel_manager.request_approval(
+                platform=platform,
+                thread_id=str(chat_id),
+                tool_name=interrupted.get('action', 'unknown'),
+                args=tool_args
+            )
+            return {"status": "paused_again"}
+
+    except Exception as e:
+        logger.error(f"❌ Resume error ({platform}): {e}", exc_info=True)
+        await channel_manager.send_message(platform, str(chat_id), f"❌ Error resuming action:\n`{str(e)[:500]}`")
+        return {"error": str(e)[:500]}
+
+
+# ==========================================================
+# 3. Telegram Polling (for local dev)
 # ==========================================================
 
 async def _poll_telegram():
@@ -196,12 +339,8 @@ async def _poll_telegram():
                 # Show typing indicator
                 await telegram_client.send_typing_action(chat_id)
 
-                msg = IncomingMessageEvent(
-                    platform="telegram",
-                    user_id=str(chat_id),
-                    text=text
-                )
-                await lane_manager.submit(str(chat_id), worker.agent_daemon, graph, msg)
+                # Run the graph directly in the background
+                asyncio.create_task(direct_agent_invoke(str(chat_id), text, "telegram"))
 
         except asyncio.CancelledError:
             logger.info("📡 Polling stopped")
@@ -222,8 +361,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Mount web chat UI
+from fastapi.staticfiles import StaticFiles
 from interfaces.web_chat import router as chat_router
+
+# Mount static files (CSS, JS)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 app.include_router(chat_router)
 
 
@@ -298,13 +441,8 @@ async def webhook(request: Request):
         # Show typing indicator
         await telegram_client.send_typing_action(chat_id)
 
-        msg = IncomingMessageEvent(
-            platform="telegram",
-            user_id=str(chat_id),
-            text=text
-        )
-        # Run the graph sequentially via LaneManager
-        await lane_manager.submit(str(chat_id), worker.agent_daemon, graph, msg)
+        # Run the graph directly (async without blocking the webhook response)
+        asyncio.create_task(direct_agent_invoke(str(chat_id), text, "telegram"))
 
         return {"status": "processing"}
 
@@ -363,19 +501,8 @@ async def _handle_callback_query(callback_query: dict):
         )
         return {"status": "awaiting_edit"}
 
-    msg = ResumeEvent(
-        platform="telegram",
-        user_id=thread_id,
-        decision=decision
-    )
-
-    # Resume the graph sequentially via LaneManager
-    await lane_manager.submit(
-        thread_id, 
-        worker.resume_daemon, 
-        graph,
-        msg
-    )
+    # Resume the graph directly
+    asyncio.create_task(direct_resume_invoke(thread_id, decision, "telegram"))
 
     return {"status": "resumed"}
 
@@ -403,14 +530,8 @@ async def chat_endpoint(thread_id: str, request: Request):
     if await _handle_commands(thread_id, user_input, "web"):
         return {"status": "command_handled"}
 
-    msg = IncomingMessageEvent(
-        platform="web",
-        user_id=thread_id,
-        text=user_input
-    )
-    
-    # Push to queue and return instantly
-    await lane_manager.submit(thread_id, worker.agent_daemon, graph, msg)
+    # Execute instantly and directly in background
+    asyncio.create_task(direct_agent_invoke(thread_id, user_input, "web"))
     
     return {"status": "queued"}
 
@@ -429,13 +550,8 @@ async def resume_hitl_endpoint(thread_id: str, request: Request):
 
     logger.info(f"🌐 Gateway API resume queued: {decision} for thread {thread_id}")
 
-    msg = ResumeEvent(
-        platform="web",
-        user_id=thread_id,
-        decision=decision
-    )
-
-    await lane_manager.submit(thread_id, worker.resume_daemon, graph, msg)
+    # Resume directly
+    asyncio.create_task(direct_resume_invoke(thread_id, decision, "web"))
     
     return {"status": "queued"}
 

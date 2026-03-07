@@ -10,8 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Configure basic logging level globally
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+# Note: logging.basicConfig is called in app.py (the entrypoint)
 
 from pydantic_settings import BaseSettings
 from pydantic import Field

@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EnterpriseClaw — Chat</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Cinzel:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/chat.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
+</head>
+<body>
+    <!-- ═══ YANTRA SVG BACKGROUND ═══ -->
+    <svg class="yantra-bg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" preserveAspectRatio="xMidYMid slice">
+        <!-- SVG contents imported from original, simplified for readability -->
+        <circle class="yl3" cx="500" cy="500" r="420" fill="none" stroke="#c9a84c" stroke-width="0.8" opacity="0.12"/>
+        <circle class="yl" cx="500" cy="500" r="60" fill="none" stroke="#c9a84c" stroke-width="0.5" opacity="0.25"/>
+    </svg>
+
+    <div class="shell">
+        <aside class="sidebar">
+            <div class="sidebar-logo">
+                <div class="sidebar-logo-icon">⚡</div>
+                <div class="sidebar-logo-title" style="font-size: 16px;">EnterpriseClaw</div>
+                <div class="sidebar-logo-sub">Production Agent</div>
+            </div>
+            <div class="sidebar-divider"></div>
+            <nav class="sidebar-nav">
+                <div class="sidebar-nav-item active"><span class="nav-icon">◈</span>Chat</div>
+                <div class="sidebar-nav-item"><span class="nav-icon">◇</span>Memory</div>
+                <div class="sidebar-nav-item"><span class="nav-icon">△</span>Skills</div>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="sidebar-status">Online</div>
+                <div class="sidebar-footer-text">Powered by local agent</div>
+            </div>
+        </aside>
+
+        <main class="main-panel">
+            <div class="panel-header">
+                <span class="panel-header-title">Chat</span>
+                <span class="panel-header-line"></span>
+            </div>
+
+            <div class="messages" id="messages">
+                <div class="welcome" id="welcome">
+                    <h2>EnterpriseClaw</h2>
+                    <p>Deterministic Agentic Framework</p>
+                    <p class="welcome-hint">Type a message to begin</p>
+                </div>
+                <div class="typing" id="typing">
+                    <div class="typing-dots"><span></span><span></span><span></span></div>
+                </div>
+            </div>
+
+            <div class="input-float">
+                <div class="input-glass">
+                    <textarea class="input-field" id="userInput" placeholder="Ask me anything... (Shift+Enter for new line)" rows="1"></textarea>
+                    <button class="send-btn" id="sendBtn">→</button>
+                </div>
+            </div>
+        </main>
+    </div>
+    
+    <script src="/static/js/chat.js"></script>
+</body>
+</html>
