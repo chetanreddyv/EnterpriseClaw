@@ -12,7 +12,7 @@ EnterpriseClaw solves the "Orchestrator Clash" by splitting the brain from the b
 
 1. **The Brain (LLM + Flat Schemas):** We use native model tool-calling with strictly flattened Pydantic schemas (zero implicit defaults) to eliminate LLM hallucinations and API warnings.
 2. **The Brawn (LangGraph):** The entire execution loop, memory check-pointing, and HITL pausing are handled natively by LangGraph's state machine.
-3. **The Gateway (Decoupled I/O):** Webhooks and API endpoints never wait for the LLM. Every request is pushed to an async queue (`LaneManager`) and processed sequentially per-thread.
+3. **The Direct Gateway:** Webhooks and API endpoints stream-invoke the LangGraph state machine directly via `astream()`, drastically simplifying background execution without bloated queues.
 
 ---
 
@@ -22,7 +22,7 @@ EnterpriseClaw solves the "Orchestrator Clash" by splitting the brain from the b
 * **🧠 Enterprise-Grade Memory (MemoryGate):** Unlike standard frameworks that dump agent memory into a single, fragile markdown file, EnterpriseClaw uses a dual-layer memory architecture powered by SQLite and Zvec vector indexing for lightning-fast, semantic context retrieval.
 * **🔌 The Standard Library & Skill Auto-Loader:** EnterpriseClaw comes pre-equipped with a "Standard Library" of core capabilities (`exec_command`, `web_search`). You don't need to specify these in configuration files—the agent intrinsically knows how to use them, and they are permanently protected by HITL. For custom APIs, simply drop a `SKILL.md` file into the `/skills` directory and the framework binds Python tools on the fly.
 * **🚦 The Gateway Pattern:** The core execution engine has zero knowledge of the delivery channel. A central `ChannelManager` translates abstract agent actions into UI-specific formats (Telegram Inline Keyboards, Web UI buttons, etc.).
-* **⏳ True LangGraph Subagents:** Advanced background operations. Instead of simple fire-and-forget scripts, EnterpriseClaw spawns ephemeral LangGraph execute loops for complex background research. When a subagent finishes, it securely injects its report directly into the primary thread's checkpointer state.
+* **💓 System Heartbeat:** A lightweight asynchronous loop wakes the agent every 15 minutes to perform time-based tasks natively using `check_current_time` and `schedule_reminder` tools.
 * **👀 Background Process Monitoring:** When the agent executes a background shell command, it doesn't just blind-fire it. EnterpriseClaw attaches an async monitor to capture `stdout`/`stderr` and automatically notifies the primary agent thread the moment the process concludes.
 
 * **🔀 Model Agnosticism:** Swap the underlying LLM at runtime without touching code. Backed by LangChain's `init_chat_model` factory, each conversation thread stores its preferred model in the SQLite checkpointer — meaning different threads can run different providers simultaneously, and preferences survive restarts.
@@ -54,7 +54,7 @@ playwright install chromium
 | `browser_type(selector, text)` | 🔐 HITL | Type text into an input field |
 | `browser_execute_js(script)` | 🔐 HITL | Run JavaScript on the page |
 
-> Interaction tools (`click`, `type`, `execute_js`) pause for human approval before executing, exactly like `exec_command`. Browser contexts are isolated per conversation thread, and idle sessions are automatically garbage-collected after 30 minutes.
+> **Tiered Autonomy:** Read-only tools (`navigate`, `get_text`, `screenshot`) run freely. Dangerous interaction tools (`click`, `type`, `execute_js`) pause for human approval before executing, exactly like `exec_command`. Browser contexts are isolated per conversation thread, and idle sessions are automatically garbage-collected after 30 minutes.
 
 
 
@@ -78,6 +78,15 @@ Send `/model <provider/model>` from **any channel** (Telegram or Web) to hot-swa
 | Any OpenAI-compat | `openai/<model>` + `OPENAI_BASE_URL` | `OPENAI_API_KEY` |
 
 > The agent automatically falls back to Gemini if the requested model fails to initialise.
+
+## 🛠️ Interactive Commands
+
+EnterpriseClaw provides several slash commands to manipulate agent state mid-conversation without needing to restart the server or edit config files:
+
+*   `/model <provider/model>` — Hot-swap the underlying LLM for the current thread (e.g. `/model openai/gpt-4o`).
+*   `/permit <tool_name>` — Auto-approve a specific tool for the current thread. The agent will no longer pause for Human-In-The-Loop approval when using this tool (e.g., `/permit browser_click`).
+*   `/deny <tool_name>` — Revoke auto-approval for a tool. The agent will once again pause for HITL approval.
+*   `/tools` — Print a list of all tools available to the agent and their current security status (Auto-Approved vs Requires Approval).
 
 ### 1. Installation
 
@@ -129,7 +138,7 @@ Other typical local agent frameworks rely on reading and writing to plain text `
 EnterpriseClaw introduces **MemoryGate**, a highly-scalable, dual-layer memory architecture:
 
 1. **Short-Term State (Thread Memory):** LangGraph's SQLite checkpointer natively tracks the sliding window of conversational context and pending tool executions. If the server crashes while waiting for human approval, the exact state is flawlessly preserved and instantly thawed upon reboot.
-2. **Long-Term Memory (Zvec Semantic Indexing):** Background tasks asynchronously extract key facts and user preferences from completed conversational loops, storing them in a Zvec vector index. When a user asks a question, the agent performs a semantic search to inject *only* the highly relevant context into the prompt, saving tokens and vastly improving reasoning accuracy.
+2. **Long-Term Memory (Agent-Driven Semantic Indexing):** Instead of wasting tokens passively parsing every message, the agent is empowered to actively use a `@tool` (`save_to_long_term_memory`) to save preferences and facts to a Zvec vector index. When a user asks a question, the agent performs a semantic search to inject *only* the highly relevant context into the prompt, saving tokens and vastly improving reasoning accuracy.
 
 ---
 
@@ -166,10 +175,9 @@ Always verify the current directory before running commands.
 
 EnterpriseClaw is built on three distinct layers, providing an enterprise-grade execution environment superior to typical monolithic agent loops:
 
-1. **The Gateway API (`app.py`):** Fast, stateless endpoints that receive inputs and push `IncomingMessageEvent` payloads to the bus.
-2. **The Control Plane (`core/worker.py` & LangGraph):** A continuous background loop that consumes events, steps through the LangGraph state machine, executes tools, and suspends state to SQLite when HITL is required. 
-3. **The Subagent Plane (`nodes/subagents.py`):** Dedicated, ephemeral LangGraph loops for background tasks. Unlike standard `while` loop subagents that vanish if a server restarts, EnterpriseClaw's background tasks run within the LangGraph ecosystem and cleanly inject their outcomes into the primary conversation thread.
-4. **The Channel Manager (`core/channel_manager.py`):** Intercepts outputs from the Control Plane and formats them for the specific user interface (e.g., rendering an "Approve/Reject" button in Telegram).
+1. **The Gateway API (`app.py`):** Fast, stateless endpoints that stream asynchronous LangGraph invocations directly from user inputs and the system heartbeat.
+2. **The Control Plane (LangGraph):** A continuous execution loop that steps through the state machine, executes read-only tools autonomously (Tiered Autonomy), and suspends state to SQLite when HITL is required for dangerous write actions.
+3. **The Channel Manager (`core/channel_manager.py`):** Intercepts outputs from the Control Plane and formats them for the specific user interface (e.g., rendering an "Approve/Reject" button in Telegram or Web Chat).
 
 ## 🤝 Contributing
 

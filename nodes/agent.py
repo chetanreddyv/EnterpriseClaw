@@ -50,13 +50,11 @@ def _parse_skill_frontmatter(skill_path: Path) -> dict:
             
     return frontmatter
 
-def _get_enabled_tools_and_write_actions() -> tuple[list[str], set[str]]:
+def _get_enabled_tools_and_write_actions(active_skills: list[str] = None, load_all: bool = False) -> tuple[list[str], set[str]]:
     """
-    Returns enabled tools and write actions.
-    Auto-loads from SKILL.md files.
+    Returns enabled tools and write actions dynamically based on active skills.
+    Defaults to Standard Library if no skills are active.
     """
-    # 0. The Standard Library (Core Capabilities available to all skills)
-    # We remove delegate_task and let the agent browse autonomously
     enabled_tools = {"exec_command", "web_search", "web_fetch", "check_current_time", "schedule_reminder", "save_to_long_term_memory"}
     
     # Tiered Autonomy: Only OS-level destructive and active browsing actions require HITL
@@ -68,13 +66,22 @@ def _get_enabled_tools_and_write_actions() -> tuple[list[str], set[str]]:
     }
     write_actions = set(dangerous_actions)
     
-    # 1. Universal Auto-Loader: Scan all skill.md files
-    # Case-insensitive match for skill.md or SKILL.md
-    for skill_file in SKILLS_DIR.rglob("*"):
-        if skill_file.name.lower() != "skill.md":
-            continue
-            
-        skill_name = skill_file.parent.name
+    skill_files_to_check = []
+    
+    if load_all:
+        for skill_file in SKILLS_DIR.rglob("*"):
+            if skill_file.name.lower() == "skill.md":
+                skill_files_to_check.append(skill_file)
+    elif active_skills:
+        for skill_name in active_skills:
+            skill_dir = SKILLS_DIR / skill_name
+            if skill_dir.exists():
+                for f in skill_dir.iterdir():
+                    if f.name.lower() == "skill.md":
+                        skill_files_to_check.append(f)
+                        break
+
+    for skill_file in skill_files_to_check:
         frontmatter = _parse_skill_frontmatter(skill_file)
         requested_tools = []
 
@@ -122,13 +129,14 @@ async def agent_node(state: dict) -> dict:
     # ── Fetch long-term memory context and dynamic skill context ────
     memory_context = ""
     skill_prompts = "You are a helpful personal assistant. Be concise and accurate."
+    matched_skill_names = []
     thread_id = state.get("chat_id", "default_thread")
     try:
-        from memory.gate import memorygate
-        memory_context = await memorygate.get_context(thread_id=thread_id)
+        from memory.retrieval import memory_retrieval
+        memory_context = await memory_retrieval.get_context(thread_id=thread_id)
         if memory_context != "No established context.":
             logger.info(f"  -> Successfully retrieved memory context ({len(memory_context)} chars)")
-        skill_prompts = await memorygate.get_relevant_skills(user_input)
+        skill_prompts, matched_skill_names = await memory_retrieval.get_relevant_skills(user_input)
         logger.info(f"  -> Skill prompts loaded ({len(skill_prompts)} chars): {skill_prompts[:200]}...")
     except Exception as e:
         logger.warning(f"  -> Context/Skill retrieval skipped/failed: {e}")
@@ -155,7 +163,7 @@ async def agent_node(state: dict) -> dict:
     full_system_prompt = "\\n\\n---\\n\\n".join(prompt_parts) + "\\n\\nALWAYS format your output using standard Markdown (use *, _, `, ```, lists). Do NOT use HTML tags. Respond directly to the user."
 
     # ── Build LangChain Tools ─────────────────────────────────────
-    enabled_tool_names, _ = _get_enabled_tools_and_write_actions()
+    enabled_tool_names, _ = _get_enabled_tools_and_write_actions(active_skills=matched_skill_names)
     
     from mcp_servers import GLOBAL_TOOL_REGISTRY
     

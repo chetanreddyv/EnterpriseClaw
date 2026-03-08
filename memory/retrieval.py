@@ -43,7 +43,7 @@ class MemoryRetrieval:
 
             semantic_context = ""
             if latest_user:
-                semantic_context = await self.store.get_relevant_context(latest_user, top_k=10)
+                semantic_context = await self.store.get_relevant_context(latest_user, top_k=3)
 
             if semantic_context:
                 parts.append("## Semantic Memory Context")
@@ -54,7 +54,7 @@ class MemoryRetrieval:
 
         return "\n".join(parts) if parts else "No established context."
 
-    async def get_relevant_skills(self, user_input: str) -> str:
+    async def get_relevant_skills(self, user_input: str) -> tuple[str, list[str]]:
         """Fetch dynamic skill prompts to inject into system prompt."""
         return await self.store.get_relevant_skills(user_input, top_k=2)
 

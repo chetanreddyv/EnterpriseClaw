@@ -1,7 +1,5 @@
 """
 core/llm.py — Shared LLM initialization helper.
-
-Used by agent.py and subagents.py to avoid duplicating the
 model-agnostic init + fallback pattern.
 """
 

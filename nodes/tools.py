@@ -6,6 +6,8 @@ appends the result as a ToolMessage to the state.
 """
 
 import logging
+import uuid
+from pathlib import Path
 from langchain_core.messages import ToolMessage
 
 logger = logging.getLogger(__name__)
@@ -39,7 +41,24 @@ async def _execute_tool_func(action_name: str, tool_args: dict, config: dict):
         # Allow multimodal returns (list of content blocks) to pass through
         if isinstance(result, list):
             return result
-        return str(result)
+            
+        result_str = str(result)
+        
+        # Scratchpad offloading for large payloads
+        if len(result_str) > 4000:
+            scratchpad_dir = Path("data/scratchpad")
+            scratchpad_dir.mkdir(parents=True, exist_ok=True)
+            
+            file_id = uuid.uuid4().hex[:8]
+            file_name = f"output_{action_name}_{file_id}.md"
+            file_path = scratchpad_dir / file_name
+            
+            file_path.write_text(result_str, encoding="utf-8")
+            
+            preview = result_str[:500]
+            result_str = f"Output exceeded context limits. TRUNCATED. Raw output saved to: {file_path.absolute()}\n\nTop preview:\n{preview}\n\n...[TRUNCATED]...\n\n**If you need the full output, use your `exec_command` tool to run `cat {file_path.absolute()} | grep [keyword]`**"
+            
+        return result_str
     except Exception as e:
         logger.error(f"  -> {action_name} failed: {e}")
         return f"Error executing {action_name}: {e}"
@@ -60,27 +79,19 @@ async def execute_tools_node(state: dict) -> dict:
     
     tool_messages = []
     
-    # Tools like exec_command and delegate_research need the thread_id to inject backgrounds
+    # Tools like exec_command need the thread_id to inject backgrounds
     thread_id = state.get("chat_id", "default_thread")
     config = {"configurable": {
         "thread_id": thread_id,
         "active_model": state.get("active_model")
     }}
     
-    # Block dangerous tools if we are inside a sub-agent
-    is_subagent = thread_id.startswith("subagent_")
-    BLOCKED_FOR_SUBAGENTS = {"exec_command", "delegate_task", "delegate_research"}
-    
     for tool_call in last_message.tool_calls:
         action_name = tool_call["name"]
         tool_args = tool_call["args"]
         call_id = tool_call["id"]
         
-        if is_subagent and action_name in BLOCKED_FOR_SUBAGENTS:
-            logger.warning(f"Blocked dangerous tool '{action_name}' from being executed by subagent {thread_id}")
-            result = f"Error: Tool '{action_name}' is permanently blocked for autonomous sub-agents. Do not attempt to use it."
-        else:
-            result = await _execute_tool_func(action_name, tool_args, config)
+        result = await _execute_tool_func(action_name, tool_args, config)
             
         tool_messages.append(ToolMessage(content=result, tool_call_id=call_id))
         

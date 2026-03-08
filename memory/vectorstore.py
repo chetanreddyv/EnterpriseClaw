@@ -8,6 +8,7 @@ semantic deduplication, time-decay scoring, and skill matching.
 import logging
 import asyncio
 import math
+import os
 import uuid
 from typing import List
 from pathlib import Path
@@ -28,6 +29,7 @@ HEALTH_ID = "__health_check__"
 
 # Time-decay parameter: half-life of ~70 days (lambda = ln(2) / 70)
 TIME_DECAY_LAMBDA = 0.0099
+MEMORY_SIMILARITY_THRESHOLD = float(os.getenv("MEMORY_SIMILARITY_THRESHOLD", "0.82"))
 
 
 class ZvecMemoryStore:
@@ -144,7 +146,8 @@ class ZvecMemoryStore:
                 zvec.VectorQuery("embedding", vector=vector),
                 topk=top_k * 2
             )
-            zvec_ranked = [res.id for res in results if res.id != HEALTH_ID]
+            # Filter by relevance threshold
+            zvec_ranked = [res.id for res in results if res.id != HEALTH_ID and res.score >= MEMORY_SIMILARITY_THRESHOLD]
         except Exception as e:
             logger.error(f"Zvec query failed: {e}")
 
@@ -187,10 +190,11 @@ class ZvecMemoryStore:
 
         return "\n".join(f"- [{item['kind']}] {item['text']}" for item in top_items)
 
-    async def get_relevant_skills(self, query: str, top_k: int = 2, threshold: float = 0.65) -> str:
-        """Search Zvec for skills relevant to the query. Only returns skills above score threshold."""
+    async def get_relevant_skills(self, query: str, top_k: int = 2) -> tuple[str, list[str]]:
+        """Search Zvec for skills relevant to the query. Returns (prompt_string, matched_skill_names)."""
+        fallback = ("You are a helpful personal assistant. Be concise and accurate.", [])
         if not self.skill_collection:
-            return ""
+            return fallback
 
         vector = (await self._embed([query]))[0]
 
@@ -212,23 +216,24 @@ class ZvecMemoryStore:
                 id_words = res.id.lower().replace("_", " ").split()
                 keyword_match = any(w in query_lower for w in id_words if len(w) > 2)
 
-                if res.score < threshold and not keyword_match:
-                    logger.debug(f"  -> Skipping skill {res.id} (below threshold {threshold} and no keyword match)")
+                if res.score < MEMORY_SIMILARITY_THRESHOLD and not keyword_match:
+                    logger.debug(f"  -> Skipping skill {res.id} (below threshold {MEMORY_SIMILARITY_THRESHOLD} and no keyword match)")
                     continue
 
                 skill_id = res.id
                 if skill_id not in skill_names:
                     skill_names.append(skill_id)
-                    reason = f"score={res.score:.3f}" if res.score >= threshold else "keyword match"
+                    reason = f"score={res.score:.3f}" if res.score >= MEMORY_SIMILARITY_THRESHOLD else "keyword match"
                     logger.info(f"  -> Skill accepted: {skill_id} ({reason})")
 
             skill_names = skill_names[:top_k]
 
             if not skill_names:
                 logger.debug("  -> No skills above threshold — using general fallback")
-                return "You are a helpful personal assistant. Be concise and accurate."
+                return fallback
 
             prompts = []
+            matched_skill_names = []
             for skill_name in skill_names:
                 skill_dir = SKILLS_DIR / skill_name
                 skill_file = None
@@ -242,16 +247,17 @@ class ZvecMemoryStore:
                 if skill_file and skill_file.exists():
                     content = skill_file.read_text()
                     prompts.append(f"## {skill_name.replace('_', ' ').title()}\n{content}")
+                    matched_skill_names.append(skill_name)
                     logger.info(f"  -> Retrieving dynamic skill prompt: {skill_file.name}")
 
             if not prompts:
-                return "You are a helpful personal assistant. Be concise and accurate."
+                return fallback
 
-            return "\n\n".join(prompts)
+            return "\n\n".join(prompts), matched_skill_names
 
         except Exception as e:
             logger.error(f"Zvec skills query failed: {e}")
-            return "You are a helpful personal assistant. Be concise and accurate."
+            return fallback
 
     async def apply_updates(self, memory, source_thread_id: str = None):
         """Write to SQLite memory_items only. Zvec is synced deferred."""

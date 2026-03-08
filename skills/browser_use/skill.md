@@ -21,7 +21,7 @@ You can control a **real Chromium browser** to navigate websites, interact with 
 - **`browser_wait_for(seconds, text)`** — Wait for a time delay or for specific text to appear (useful for AJAX/SPA content).
 - **`browser_tab_management(action, index)`** — List, open, switch, or close browser tabs.
 
-### Interaction Tools (require human approval)
+### Interaction Tools 
 
 - **`browser_click(selector, double_click)`** — Click an element. Accepts CSS selectors (`#login-btn`), visible text (`Sign In`), or role+name.
 - **`browser_type(selector, text, submit)`** — Type text into an input field. Set `submit=True` to press Enter after typing.

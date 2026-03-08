@@ -44,22 +44,35 @@ checkpointer = None
 # ==========================================================
 
 async def _handle_commands(chat_id: str, text: str, platform: str) -> bool:
-    """
-    Check for special commands (like /model) and handle them if found.
-    Returns True if a command was handled (and execution should stop).
-    """
-    if not text.startswith("/"):
-        return False
+    """Handle slash commands (e.g. /model, /permit). Returns True if handled."""
+    if not text.startswith("/"): return False
+    parts = text.split()
+    cmd = parts[0].lower()
 
-    if text.startswith("/model "):
-        new_model = text.split(" ", 1)[1].strip()
-        await graph.aupdate_state(
-            {"configurable": {"thread_id": chat_id}},
-            {"active_model": new_model},
-        )
-        msg = f"🔄 Brain swapped! Now using: `{new_model}`"
+    if cmd == "/model" and len(parts) > 1:
+        await graph.aupdate_state({"configurable": {"thread_id": chat_id}}, {"active_model": parts[1]})
+        await channel_manager.send_message(platform, chat_id, f"🔄 Brain swapped! Now using: `{parts[1]}`")
+        return True
+
+    if cmd in ("/permit", "/deny") and len(parts) > 1:
+        state = await graph.aget_state({"configurable": {"thread_id": chat_id}})
+        approved = set(state.values.get("approved_tools") or [])
+        if cmd == "/permit":
+            approved.add(parts[1])
+            msg = f"🔓 `{parts[1]}` is now AUTO-APPROVED"
+        else:
+            approved.discard(parts[1])
+            msg = f"🔒 `{parts[1]}` now REQUIRES approval"
+        await graph.aupdate_state({"configurable": {"thread_id": chat_id}}, {"approved_tools": list(approved)})
         await channel_manager.send_message(platform, chat_id, msg)
-        logger.info(f"  -> Model swapped for {chat_id} ({platform}): {new_model}")
+        return True
+
+    if cmd == "/tools":
+        from nodes.agent import _get_enabled_tools_and_write_actions
+        enabled, write_actions = _get_enabled_tools_and_write_actions(load_all=True)
+        approved = set((await graph.aget_state({"configurable": {"thread_id": chat_id}})).values.get("approved_tools") or [])
+        lines = [f"🔓 `{t}`" if t in approved else f"� `{t}`" if t in write_actions else f"🟢 `{t}`" for t in sorted(enabled)]
+        await channel_manager.send_message(platform, chat_id, "🛠️ **Tool Permissions (This Thread)**\n" + "\n".join(lines))
         return True
 
     return False
@@ -559,7 +572,7 @@ async def resume_hitl_endpoint(thread_id: str, request: Request):
 @app.post("/api/v1/system/{thread_id}/notify")
 async def system_notify_endpoint(thread_id: str, request: Request):
     """
-    Standardized Gateway API for external tools and subagents to inject 
+    Standardized Gateway API for external tools to inject 
     asynchronous notifications into the graph state and deliver them to the user.
     """
     if not graph:
@@ -591,6 +604,55 @@ async def system_notify_endpoint(thread_id: str, request: Request):
 # 8. Entrypoint
 # ==========================================================
 
+async def run_cli():
+    """Terminal UI loop for the agent."""
+    global graph, checkpointer
+    
+    if settings.needs_onboarding:
+        print("⚠️ EnterpriseClaw is not configured yet! Run the setup wizard: uv run python onboarding.py --cli")
+        return
+
+    from memory.retrieval import memory_retrieval
+    from interfaces.cli import CLIClient
+    
+    await memory_retrieval.initialize()
+    channel_manager.register_client("cli", CLIClient())
+    
+    async with checkpointer_context() as cp:
+        checkpointer = cp
+        graph = build_graph(checkpointer=checkpointer)
+        chat_id = "cli_user"
+        print("\n🦅 EnterpriseClaw CLI is ready! Type 'exit' to quit.\n")
+
+        while True:
+            try:
+                user_input = await asyncio.to_thread(input, "You: ")
+                if user_input.strip().lower() in ("exit", "quit"):
+                    break
+                if not user_input.strip():
+                    continue
+
+                if await _handle_commands(chat_id, user_input, "cli"):
+                    continue
+
+                result = await direct_agent_invoke(chat_id, user_input, "cli")
+
+                # Handle continuous loopback for chained HITL actions
+                while result.get("approval_required") or result.get("status") == "paused_again":
+                    decision_input = await asyncio.to_thread(input, "\n[y/n/e] > ")
+                    decision_map = {"y": "approve", "n": "reject", "e": "edit"}
+                    decision = decision_map.get(decision_input.strip().lower(), "reject")
+                    result = await direct_resume_invoke(chat_id, decision, "cli")
+
+            except EOFError:
+                break
+            except Exception as e:
+                logger.error(f"❌ CLI Error: {e}")
+
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    import sys
+    if "--cli" in sys.argv:
+        asyncio.run(run_cli())
+    else:
+        import uvicorn
+        uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)

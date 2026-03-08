@@ -42,6 +42,7 @@ class AgentState(TypedDict):
 
     # ── Model ─────────────────────────────────────────────────
     active_model: Optional[str]               # Active LLM for this thread (e.g. "google_genai/gemini-3-flash-preview")
+    approved_tools: Optional[list[str]]       # Tools that bypass HITL for this thread
 
 
 # ==========================================================
@@ -69,11 +70,13 @@ def route_after_agent(state: AgentState) -> str:
         return END
 
     # Dynamically get the dangerous write actions
-    _, write_actions = _get_enabled_tools_and_write_actions()
+    _, write_actions = _get_enabled_tools_and_write_actions(load_all=True)
+    approved_tools = state.get("approved_tools") or []
 
     # Check for dangerous tools requiring HITL
     for tool_call in last_message.tool_calls:
-        if tool_call["name"] in write_actions:
+        tool_name = tool_call["name"]
+        if tool_name in write_actions and tool_name not in approved_tools:
             return "human_approval"
 
     # Otherwise, it's a safe read tool. Execute immediately.
