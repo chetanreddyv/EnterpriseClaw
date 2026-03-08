@@ -209,6 +209,8 @@ async def direct_agent_invoke(chat_id: str, text: str, platform: str) -> dict:
                 "chat_id": str(chat_id),
                 "user_input": text,
                 "tool_failure_count": 0,
+                "active_skills": None,
+                "skill_prompts": None,
             },
             config=config,
             stream_mode="updates",

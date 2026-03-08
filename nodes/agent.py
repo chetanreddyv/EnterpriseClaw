@@ -128,18 +128,27 @@ async def agent_node(state: dict) -> dict:
 
     # ── Fetch long-term memory context and dynamic skill context ────
     memory_context = ""
-    skill_prompts = "You are a helpful personal assistant. Be concise and accurate."
-    matched_skill_names = []
+    skill_prompts = state.get("skill_prompts")
+    matched_skill_names = state.get("active_skills")
+    
     thread_id = state.get("chat_id", "default_thread")
     try:
         from memory.retrieval import memory_retrieval
         memory_context = await memory_retrieval.get_context(thread_id=thread_id)
         if memory_context != "No established context.":
             logger.info(f"  -> Successfully retrieved memory context ({len(memory_context)} chars)")
-        skill_prompts, matched_skill_names = await memory_retrieval.get_relevant_skills(user_input)
-        logger.info(f"  -> Skill prompts loaded ({len(skill_prompts)} chars): {skill_prompts[:200]}...")
+            
+        if matched_skill_names is None or skill_prompts is None:
+            skill_prompts, matched_skill_names = await memory_retrieval.get_relevant_skills(user_input)
+            logger.info(f"  -> Skill prompts loaded ({len(skill_prompts)} chars): {skill_prompts[:200]}...")
+        else:
+            logger.info(f"  -> Using frozen active skills from state: {matched_skill_names}")
     except Exception as e:
         logger.warning(f"  -> Context/Skill retrieval skipped/failed: {e}")
+        if matched_skill_names is None:
+            matched_skill_names = []
+        if skill_prompts is None:
+            skill_prompts = "You are a helpful personal assistant. Be concise and accurate."
 
     # ── Construct full system prompt: Identity → Memory → Skill ────
     prompt_parts = []
@@ -203,7 +212,9 @@ async def agent_node(state: dict) -> dict:
             "messages": new_messages, 
             "tool_failure_count": 0, 
             "agent_response": result.content,
-            "user_input": "" # Clear user input so we don't duplicate it on loopbacks
+            "user_input": "", # Clear user input so we don't duplicate it on loopbacks
+            "active_skills": matched_skill_names,
+            "skill_prompts": skill_prompts
         }
 
     except Exception as e:

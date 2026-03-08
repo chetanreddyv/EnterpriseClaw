@@ -43,6 +43,9 @@ class AgentState(TypedDict):
     # ── Model ─────────────────────────────────────────────────
     active_model: Optional[str]               # Active LLM for this thread (e.g. "google_genai/gemini-3-flash-preview")
     approved_tools: Optional[list[str]]       # Tools that bypass HITL for this thread
+    
+    active_skills: Optional[list[str]]        # Frozen active skills for multi-step tasks
+    skill_prompts: Optional[str]              # Cached skill prompts
 
 
 # ==========================================================
@@ -67,6 +70,10 @@ def route_after_agent(state: AgentState) -> str:
 
     # No tool calls? The agent is done.
     if not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
+        # Guardrail: If the model returns an empty or near-empty response without tool calls, EXIT.
+        content = getattr(last_message, "content", "")
+        if not content or len(content.strip()) <= 2:
+            logger.warning("⚠️ Model returned empty response. Exiting to prevent loop.")
         return END
 
     # Dynamically get the dangerous write actions
