@@ -28,6 +28,7 @@ class AgentState(TypedDict):
     # ── Core ──────────────────────────────────────────────────
     chat_id: str                              # Telegram chat ID (= thread_id)
     user_input: str                           # Current user message
+    original_query: Optional[str]             # Preserves intent across loopbacks
     messages: Annotated[list[BaseMessage], add_messages] # Context window
 
     # ── Agent ─────────────────────────────────────────────────
@@ -72,8 +73,10 @@ def route_after_agent(state: AgentState) -> str:
     if not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
         # Guardrail: If the model returns an empty or near-empty response without tool calls, EXIT.
         content = getattr(last_message, "content", "")
-        if not content or len(content.strip()) <= 2:
-            logger.warning("⚠️ Model returned empty response. Exiting to prevent loop.")
+        # Handle cases where agent.py converted empty lists/nulls to " "
+        if not content or str(content).strip() == "" or len(str(content).strip()) <= 2:
+            logger.warning("⚠️ Model returned empty response. Exiting to prevent infinite loop.")
+            return END
         return END
 
     # Dynamically get the dangerous write actions

@@ -38,11 +38,20 @@ async def _execute_tool_func(action_name: str, tool_args: dict, config: dict):
             if inspect.isawaitable(result):
                 result = await result
         logger.info(f"  -> {action_name} completed successfully")
-        # Allow multimodal returns (list of content blocks) to pass through
+        # Allow true LangChain multimodal blocks to pass through natively
         if isinstance(result, list):
-            return result
-            
-        result_str = str(result)
+            is_multimodal = len(result) > 0 and isinstance(result[0], dict) and "type" in result[0]
+            if is_multimodal:
+                return result
+                
+            # Stringify raw data arrays safely
+            import json
+            try:
+                result_str = json.dumps(result)
+            except Exception:
+                result_str = str(result)
+        else:
+            result_str = str(result)
         
         # Scratchpad offloading for large payloads
         if len(result_str) > 4000:

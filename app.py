@@ -71,8 +71,27 @@ async def _handle_commands(chat_id: str, text: str, platform: str) -> bool:
         from nodes.agent import _get_enabled_tools_and_write_actions
         enabled, write_actions = _get_enabled_tools_and_write_actions(load_all=True)
         approved = set((await graph.aget_state({"configurable": {"thread_id": chat_id}})).values.get("approved_tools") or [])
-        lines = [f"🔓 `{t}`" if t in approved else f"� `{t}`" if t in write_actions else f"🟢 `{t}`" for t in sorted(enabled)]
+        lines = [f"🔓 `{t}`" if t in approved else f" `{t}`" if t in write_actions else f"🟢 `{t}`" for t in sorted(enabled)]
         await channel_manager.send_message(platform, chat_id, "🛠️ **Tool Permissions (This Thread)**\n" + "\n".join(lines))
+        return True
+
+    if cmd == "/models":
+        import httpx
+        from config.settings import settings
+        base_url = settings.lm_studio_base_url
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{base_url}/models", timeout=3.0)
+                response.raise_for_status()
+                data = response.json()
+                models = [model.get("id") for model in data.get("data", [])]
+                if models:
+                    msg = "🧠 **Available Local Models (LM Studio)**:\n" + "\n".join([f"- `lmstudio/{m}`" for m in models])
+                else:
+                    msg = "🧠 No local models currently loaded in LM Studio."
+        except Exception as e:
+            msg = f"❌ Could not connect to LM Studio at `{base_url}`.\nEnsure it is running and the local server is started.\nError: `{e}`"
+        await channel_manager.send_message(platform, chat_id, msg)
         return True
 
     return False
@@ -204,6 +223,16 @@ async def direct_agent_invoke(chat_id: str, text: str, platform: str) -> dict:
     config = {"configurable": {"thread_id": str(chat_id), "platform": platform}}
 
     try:
+        # 🚨 Intercept messages while graph is interrupted (HITL Edit Fix)
+        current_state = await graph.aget_state(config)
+        if current_state.next and current_state.next[0] == "human_approval":
+            logger.info(f"Intercepted HITL edit instruction from {chat_id}: {text[:50]}")
+            from langchain_core.messages import HumanMessage
+            # Inject the user's instructions into the state
+            await graph.aupdate_state(config, {"messages": [HumanMessage(content=f"User requested edits to the pending action: {text}")]})
+            # Explicitly resume the graph with the 'edit' action 
+            return await direct_resume_invoke(chat_id, "edit", platform)
+
         async for graph_event in graph.astream(
             {
                 "chat_id": str(chat_id),

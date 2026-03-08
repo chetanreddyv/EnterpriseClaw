@@ -34,3 +34,5 @@ ARCHITECTURE.md
 skills/job_application/skill.md
 
 tests/
+test_out.log
+uv.lock

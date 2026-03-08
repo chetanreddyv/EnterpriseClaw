@@ -117,10 +117,16 @@ async def agent_node(state: dict) -> dict:
     
     messages = state.get("messages", [])
     user_input = state.get("user_input", "")
+    original_query = state.get("original_query", "")
     
-    if not messages and not user_input:
+    # ALWAYS update intent when the user speaks. 
+    if user_input:
+        original_query = user_input
+        
+    if not messages and not user_input and not original_query:
         logger.debug("  -> Empty state and no user input, skipping agent loop.")
         return {}
+        
     tool_failure_count = state.get("tool_failure_count", 0)
 
     # ── Load core identity ──────────────────────────────────────────
@@ -139,7 +145,7 @@ async def agent_node(state: dict) -> dict:
             logger.info(f"  -> Successfully retrieved memory context ({len(memory_context)} chars)")
             
         if matched_skill_names is None or skill_prompts is None:
-            skill_prompts, matched_skill_names = await memory_retrieval.get_relevant_skills(user_input)
+            skill_prompts, matched_skill_names = await memory_retrieval.get_relevant_skills(original_query)
             logger.info(f"  -> Skill prompts loaded ({len(skill_prompts)} chars): {skill_prompts[:200]}...")
         else:
             logger.info(f"  -> Using frozen active skills from state: {matched_skill_names}")
@@ -191,28 +197,95 @@ async def agent_node(state: dict) -> dict:
     llm_with_tools = llm.bind_tools(all_tools) if all_tools else llm
 
     try:
-        # Prepend the system message
+        # ── 2. Compile & Truncate Messages ───────────────────────────────────
         invoke_messages = [SystemMessage(content=full_system_prompt)]
         
-        # Then append the persistent history
-        invoke_messages.extend(messages)
-        
-        # Then append the current user input as a HumanMessage
-        if user_input:
-            human_msg = HumanMessage(content=user_input)
-            invoke_messages.append(human_msg)
+        # Sliding window truncation (last 5 turns) to prevent context bloat
+        MAX_TURNS = 5
+        human_indices = [i for i, m in enumerate(messages) if getattr(m, "type", "") == "human"]
+        recent_messages = messages[human_indices[-MAX_TURNS]:] if len(human_indices) > MAX_TURNS else messages
 
+        human_msg = HumanMessage(content=user_input) if user_input else None
+        
+        # Create the raw sequence of messages meant for this invocation
+        raw_sequence = recent_messages + ([human_msg] if human_msg else [])
+
+        filtered_messages = []
+        for msg in raw_sequence:
+            msg_copy = msg.copy()
+            
+            # A. Safely handle multimodal lists WITHOUT destroying images
+            if isinstance(msg_copy.content, list):
+                new_content = []
+                for item in msg_copy.content:
+                    if isinstance(item, dict):
+                        if item.get("type") == "text" and item.get("text"):
+                            new_content.append({"type": "text", "text": item["text"]})
+                        elif item.get("type") == "image_url":
+                            new_content.append(item) 
+                    elif isinstance(item, str) and item.strip():
+                        new_content.append({"type": "text", "text": item})
+                msg_copy.content = new_content if new_content else " "
+
+            # B. Ensure string content is never null or purely whitespace
+            elif not msg_copy.content or (isinstance(msg_copy.content, str) and not msg_copy.content.strip()):
+                msg_copy.content = " " 
+
+            # C. Strip poisoned fallback errors to prevent hallucinatory loops
+            if getattr(msg_copy, "type", "") == "ai" and isinstance(msg_copy.content, str):
+                if any(err in msg_copy.content for err in ["I encountered an error", "Error code:", "I'm sorry"]):
+                    continue  
+                    
+            # D. Strip completely empty AI messages (that have no tool calls)
+            if getattr(msg_copy, "type", "") == "ai" and msg_copy.content == " " and not getattr(msg_copy, "tool_calls", []):
+                continue
+
+            filtered_messages.append(msg_copy)
+
+        # ── Consolidate Adjacent Roles (Fixes Qwen Chat Template Crash) ────
+        consolidated_messages = []
+        for msg in filtered_messages:
+            if not consolidated_messages:
+                consolidated_messages.append(msg)
+                continue
+                
+            prev_msg = consolidated_messages[-1]
+            prev_type = getattr(prev_msg, "type", "")
+            curr_type = getattr(msg, "type", "")
+            
+            # If two messages of the same type are adjacent, merge them
+            if prev_type == curr_type and prev_type in ("human", "ai"):
+                # Merge contents safely to preserve multimodal lists
+                if isinstance(prev_msg.content, list) or isinstance(msg.content, list):
+                    prev_list = prev_msg.content if isinstance(prev_msg.content, list) else [{"type": "text", "text": str(prev_msg.content)}]
+                    curr_list = msg.content if isinstance(msg.content, list) else [{"type": "text", "text": str(msg.content)}]
+                    merged_content = prev_list + [{"type": "text", "text": "\n\n[Follow-up]: "}] + curr_list
+                else:
+                    merged_content = f"{prev_msg.content}\n\n[Follow-up]: {msg.content}".strip()
+                    
+                if prev_type == "human":
+                    consolidated_messages[-1] = HumanMessage(content=merged_content)
+                else:
+                    msg.content = merged_content if merged_content else " "
+                    consolidated_messages[-1] = msg
+            else:
+                consolidated_messages.append(msg)
+
+        invoke_messages.extend(consolidated_messages)
+
+        # ── 3. Execute & Return ──────────────────────────────────────────────
         result = await llm_with_tools.ainvoke(invoke_messages)
         logger.info(f"  -> Agent response generated ({len(str(result.content))} chars)")
         
-        # Return both the human message (so it saves to state) and the AI response
-        new_messages = [human_msg, result] if user_input else [result]
+        # Note: We return the raw un-merged human_msg to LangGraph state so DB checkpoints remain pure
+        new_messages = [human_msg, result] if human_msg else [result]
         
         return {
             "messages": new_messages, 
             "tool_failure_count": 0, 
             "agent_response": result.content,
-            "user_input": "", # Clear user input so we don't duplicate it on loopbacks
+            "user_input": "", 
+            "original_query": original_query,
             "active_skills": matched_skill_names,
             "skill_prompts": skill_prompts
         }
@@ -223,9 +296,14 @@ async def agent_node(state: dict) -> dict:
 
         if tool_failure_count >= 3:
             logger.error("  -> Max failures reached, returning fallback response")
+            fallback_msg = AIMessage(content="I encountered an error processing your request. Please try again.")
+            new_msgs = [human_msg, fallback_msg] if human_msg else [fallback_msg]
+            
             return {
-                "messages": [AIMessage(content=f"I'm sorry, I encountered repeated errors trying to process your request. Error: {str(e)}\\n\\nPlease try again.")],
-                "tool_failure_count": tool_failure_count,
+                "messages": new_msgs, 
+                "tool_failure_count": 0, 
+                "user_input": "",
+                "original_query": original_query
             }
 
         return {

@@ -29,8 +29,13 @@ class Settings(BaseSettings):
         default="", description="Comma-separated list of allowed Telegram chat IDs"
     )
 
-    # ── LLM (Gemini) ─────────────────────────────────────────
-    google_api_key: str = Field(default="", description="Google AI Studio API key (used by Pydantic AI)")
+    # ── LLM Providers ─────────────────────────────────────────
+    google_api_key: str = Field(default="", description="Google AI Studio API key")
+    
+    # NEW: LM Studio / OpenAI settings
+    openai_api_key: str = Field(default="", description="OpenAI API Key (if using standard OpenAI)")
+    lm_studio_base_url: str = Field(default="http://localhost:1234/v1", description="Local URL for LM Studio")
+    lm_studio_api_key: str = Field(default="lm-studio", description="Mock API key for LM Studio")
 
     # ── Observability (optional) ──────────────────────────────
     langchain_tracing_v2: bool = Field(default=False)

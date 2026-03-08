@@ -46,9 +46,6 @@ def web_search(query: str, max_results: int = 5) -> str:
     Args:
         query: The search query.
         max_results: The maximum number of results to return (default: 5).
-        
-    Returns:
-        A string containing a markdown-formatted list of search results.
     """
     logger.info(f"🛠️ web_search(query='{query}', max_results={max_results})")
     
@@ -96,9 +93,6 @@ def web_fetch(url: str) -> str:
     
     Args:
         url: The web page URL to fetch.
-        
-    Returns:
-        A string containing the markdown extracted from the webpage.
     """
     logger.info(f"🛠️ web_fetch(url='{url}')")
     
