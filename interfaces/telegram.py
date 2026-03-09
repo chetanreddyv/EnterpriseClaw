@@ -167,6 +167,20 @@ class TelegramClient(ClientInterface):
             parse_mode=parse_mode,
         )
 
+    # ── File Handling (For Vision/Multimodal) ────────────────
+    
+    async def get_file(self, file_id: str) -> dict:
+        """Get file metadata from Telegram (includes the internal file_path)."""
+        return await self._call("getFile", file_id=file_id)
+        
+    async def download_file(self, file_path: str) -> bytes:
+        """Download raw file bytes using the file_path from get_file()."""
+        client = await self._get_client()
+        url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
+        resp = await client.get(url, timeout=60.0)
+        resp.raise_for_status()
+        return resp.content
+
     # ── Polling (for local dev) ──────────────────────────────
 
     async def delete_webhook(self) -> dict:

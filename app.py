@@ -45,7 +45,7 @@ checkpointer = None
 
 async def _handle_commands(chat_id: str, text: str, platform: str) -> bool:
     """Handle slash commands (e.g. /model, /permit). Returns True if handled."""
-    if not text.startswith("/"): return False
+    if not isinstance(text, str) or not text.startswith("/"): return False
     parts = text.split()
     cmd = parts[0].lower()
 
@@ -223,15 +223,23 @@ async def direct_agent_invoke(chat_id: str, text: str, platform: str) -> dict:
     config = {"configurable": {"thread_id": str(chat_id), "platform": platform}}
 
     try:
-        # 🚨 Intercept messages while graph is interrupted (HITL Edit Fix)
+        # 🚨 Intercept messages while graph is interrupted (HITL Deadlock Fix)
         current_state = await graph.aget_state(config)
         if current_state.next and current_state.next[0] == "human_approval":
-            logger.info(f"Intercepted HITL edit instruction from {chat_id}: {text[:50]}")
-            from langchain_core.messages import HumanMessage
-            # Inject the user's instructions into the state
-            await graph.aupdate_state(config, {"messages": [HumanMessage(content=f"User requested edits to the pending action: {text}")]})
-            # Explicitly resume the graph with the 'edit' action 
-            return await direct_resume_invoke(chat_id, "edit", platform)
+            logger.info(f"Buffered pending user feedback from {chat_id}: {str(text)[:50]}")
+            
+            # Append to the pending feedback state instead of crashing
+            existing_feedback = current_state.values.get("pending_user_feedback")
+            new_feedback = f"{existing_feedback}\n{text}" if existing_feedback else text
+            
+            await graph.aupdate_state(config, {"pending_user_feedback": new_feedback})
+            
+            await channel_manager.send_message(
+                platform, 
+                str(chat_id), 
+                "📥 *Message buffered.* I will read this as soon as you **Approve** or **Reject** the pending action."
+            )
+            return {"status": "buffered"}
 
         async for graph_event in graph.astream(
             {
@@ -360,10 +368,36 @@ async def _poll_telegram():
                     await _handle_callback_query(update["callback_query"])
                     continue
 
-                # Handle text messages
+                # Handle incoming messages (text or media)
                 message = update.get("message", {})
                 chat_id = message.get("chat", {}).get("id")
-                text = message.get("text", "")
+                
+                # Extract text and handle incoming images for multimodal vision models
+                text = message.get("text", "") or message.get("caption", "")
+                photo = message.get("photo")
+                
+                if photo:
+                    # Telegram sends multiple thumbnails. We want the highest resolution (last item).
+                    try:
+                        highest_res = sorted(photo, key=lambda p: p["file_size"])[-1]
+                        file_info = await telegram_client.get_file(highest_res["file_id"])
+                        if file_info.get("ok"):
+                            import base64
+                            file_path = file_info["result"]["file_path"]
+                            img_bytes = await telegram_client.download_file(file_path)
+                            b64_string = base64.b64encode(img_bytes).decode("utf-8")
+                            
+                            # Build LangChain-compatible multimodal list map
+                            content = []
+                            if text:
+                                content.append({"type": "text", "text": text})
+                            content.append({
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{b64_string}"}
+                            })
+                            text = content  # Reassign text argument to our new multimodal list
+                    except Exception as e:
+                        logger.error(f"Failed to download image from Telegram: {e}")
 
                 if not chat_id or not text:
                     continue
@@ -374,7 +408,7 @@ async def _poll_telegram():
                     logger.warning(f"⚠️ Ignored message from unauthorized chat_id: {chat_id}")
                     continue
 
-                logger.info(f"📩 Message from {chat_id}: {text[:100]}")
+                logger.info(f"📩 Message from {chat_id}: {str(text)[:100]}")
 
                 # ── Handle Commands (e.g. /model) ──────────────────────────
                 if await _handle_commands(str(chat_id), text, "telegram"):
@@ -467,11 +501,33 @@ async def webhook(request: Request):
     if "callback_query" in body:
         return await _handle_callback_query(body["callback_query"])
 
-    # ── Handle text messages ─────────────────────────────────
+    # ── Handle text and media messages ─────────────────────────────────
     if "message" in body:
         message = body["message"]
         chat_id = message.get("chat", {}).get("id")
-        text = message.get("text", "")
+        text = message.get("text", "") or message.get("caption", "")
+        photo = message.get("photo")
+        
+        if photo:
+            try:
+                highest_res = sorted(photo, key=lambda p: p["file_size"])[-1]
+                file_info = await telegram_client.get_file(highest_res["file_id"])
+                if file_info.get("ok"):
+                    import base64
+                    file_path = file_info["result"]["file_path"]
+                    img_bytes = await telegram_client.download_file(file_path)
+                    b64_string = base64.b64encode(img_bytes).decode("utf-8")
+                    
+                    content = []
+                    if text:
+                        content.append({"type": "text", "text": text})
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64_string}"}
+                    })
+                    text = content
+            except Exception as e:
+                logger.error(f"Webhook failed to download image: {e}")
 
         if not chat_id or not text:
             return {"status": "ignored", "reason": "no chat_id or text"}

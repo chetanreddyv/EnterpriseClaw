@@ -6,7 +6,7 @@ with SQLite checkpointing for persistent state across restarts.
 """
 
 import logging
-from typing import TypedDict, Optional, Annotated
+from typing import TypedDict, Optional, Annotated, Any
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.message import add_messages
@@ -27,7 +27,7 @@ class AgentState(TypedDict):
 
     # ── Core ──────────────────────────────────────────────────
     chat_id: str                              # Telegram chat ID (= thread_id)
-    user_input: str                           # Current user message
+    user_input: Any                           # Current user message (str or multimodal list)
     original_query: Optional[str]             # Preserves intent across loopbacks
     messages: Annotated[list[BaseMessage], add_messages] # Context window
 
@@ -38,6 +38,8 @@ class AgentState(TypedDict):
     _retry: Optional[bool]                    # Self-correction retry flag (used by router)
 
     # ── Memory ────────────────────────────────────────────────
+    last_tool_output: Optional[Any]           # Ephemeral context storage
+    pending_user_feedback: Optional[str]      # Handles messages sent during HITL interrupt
     memory_context: Optional[str]             # Retrieved long-term context
     context_data: Optional[dict]              # Additional system properties
 
@@ -74,9 +76,19 @@ def route_after_agent(state: AgentState) -> str:
         # Guardrail: If the model returns an empty or near-empty response without tool calls, EXIT.
         content = getattr(last_message, "content", "")
         # Handle cases where agent.py converted empty lists/nulls to " "
-        if not content or str(content).strip() == "" or len(str(content).strip()) <= 2:
+        
+        # Safe string conversion for lists/dicts
+        if isinstance(content, list) and not content:
+            content_str = ""
+        elif isinstance(content, dict) and not content:
+            content_str = ""
+        else:
+            content_str = str(content).strip()
+            
+        if not content_str or len(content_str) <= 2:
             logger.warning("⚠️ Model returned empty response. Exiting to prevent infinite loop.")
             return END
+            
         return END
 
     # Dynamically get the dangerous write actions

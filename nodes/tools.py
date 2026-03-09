@@ -52,20 +52,6 @@ async def _execute_tool_func(action_name: str, tool_args: dict, config: dict):
                 result_str = str(result)
         else:
             result_str = str(result)
-        
-        # Scratchpad offloading for large payloads
-        if len(result_str) > 4000:
-            scratchpad_dir = Path("data/scratchpad")
-            scratchpad_dir.mkdir(parents=True, exist_ok=True)
-            
-            file_id = uuid.uuid4().hex[:8]
-            file_name = f"output_{action_name}_{file_id}.md"
-            file_path = scratchpad_dir / file_name
-            
-            file_path.write_text(result_str, encoding="utf-8")
-            
-            preview = result_str[:500]
-            result_str = f"Output exceeded context limits. TRUNCATED. Raw output saved to: {file_path.absolute()}\n\nTop preview:\n{preview}\n\n...[TRUNCATED]...\n\n**If you need the full output, use your `exec_command` tool to run `cat {file_path.absolute()} | grep [keyword]`**"
             
         return result_str
     except Exception as e:
@@ -95,13 +81,31 @@ async def execute_tools_node(state: dict) -> dict:
         "active_model": state.get("active_model")
     }}
     
+    ephemeral_outputs = state.get("last_tool_output", []) or []
+    if not isinstance(ephemeral_outputs, list):
+        ephemeral_outputs = []
+        
     for tool_call in last_message.tool_calls:
         action_name = tool_call["name"]
         tool_args = tool_call["args"]
         call_id = tool_call["id"]
         
-        result = await _execute_tool_func(action_name, tool_args, config)
-            
-        tool_messages.append(ToolMessage(content=result, tool_call_id=call_id))
+        result_content = await _execute_tool_func(action_name, tool_args, config)
         
+        # If the result isn't multimodal, check for length
+        if isinstance(result_content, str) and len(result_content) > 2000:
+            ephemeral_outputs.append({
+                "tool": action_name,
+                "output": result_content
+            })
+            
+            preview = result_content[:500]
+            summary_history = f"[Output truncated to save context. Full output is available in ephemeral memory]. Top preview:\n{preview}\n\n...[TRUNCATED]..."
+            
+            tool_messages.append(ToolMessage(content=summary_history, tool_call_id=call_id))
+        else:
+            tool_messages.append(ToolMessage(content=result_content, tool_call_id=call_id))
+            
+    if ephemeral_outputs:
+        return {"messages": tool_messages, "last_tool_output": ephemeral_outputs}
     return {"messages": tool_messages}

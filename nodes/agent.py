@@ -121,7 +121,18 @@ async def agent_node(state: dict) -> dict:
     
     # ALWAYS update intent when the user speaks. 
     if user_input:
-        original_query = user_input
+        if isinstance(user_input, list):
+            text_parts = [item.get("text", "") for item in user_input if item.get("type") == "text"]
+            original_query = " ".join(text_parts).strip()
+        else:
+            original_query = str(user_input)
+
+    pending_feedback = state.get("pending_user_feedback")
+    if pending_feedback:
+        if user_input:
+            user_input = f"[User Feedback from previous interruption]: {pending_feedback}\n\n{user_input}"
+        else:
+            user_input = f"[User Feedback from previous interruption]: {pending_feedback}"
         
     if not messages and not user_input and not original_query:
         logger.debug("  -> Empty state and no user input, skipping agent loop.")
@@ -174,8 +185,22 @@ async def agent_node(state: dict) -> dict:
     )
     prompt_parts.append(active_memory_prompt)
     
+    # ── Inject Ephemeral Tool Context ─────────────────────────────
+    ephemeral_outputs = state.get("last_tool_output")
+    if ephemeral_outputs:
+        try:
+            ephemeral_str = json.dumps(ephemeral_outputs, indent=2)
+        except Exception:
+            ephemeral_str = str(ephemeral_outputs)
+        prompt_parts.append(
+            "## Ephemeral Context\n"
+            "The following tool results were too large for the chat history and are provided here for THIS TURN ONLY. "
+            "Use this data to answer the user, but DO NOT repeat the raw data verbatim:\n"
+            f"```json\n{ephemeral_str}\n```"
+        )
+    
     # We append extra formatting rules if we want
-    full_system_prompt = "\\n\\n---\\n\\n".join(prompt_parts) + "\\n\\nALWAYS format your output using standard Markdown (use *, _, `, ```, lists). Do NOT use HTML tags. Respond directly to the user."
+    full_system_prompt = "\n\n---\n\n".join(prompt_parts) + "\n\nALWAYS format your output using standard Markdown (use *, _, `, ```, lists). Do NOT use HTML tags. Respond directly to the user."
 
     # ── Build LangChain Tools ─────────────────────────────────────
     enabled_tool_names, _ = _get_enabled_tools_and_write_actions(active_skills=matched_skill_names)
@@ -204,6 +229,16 @@ async def agent_node(state: dict) -> dict:
         MAX_TURNS = 5
         human_indices = [i for i, m in enumerate(messages) if getattr(m, "type", "") == "human"]
         recent_messages = messages[human_indices[-MAX_TURNS]:] if len(human_indices) > MAX_TURNS else messages
+        
+        # Token-based truncation safety net (Pattern 1)
+        from langchain_core.messages import trim_messages
+        recent_messages = trim_messages(
+            recent_messages,
+            max_tokens=8000, 
+            strategy="last",
+            token_counter=lambda msgs: sum(len(str(m.content)) for m in msgs), # rough character heuristic
+            include_system=False
+        )
 
         human_msg = HumanMessage(content=user_input) if user_input else None
         
@@ -211,8 +246,9 @@ async def agent_node(state: dict) -> dict:
         raw_sequence = recent_messages + ([human_msg] if human_msg else [])
 
         filtered_messages = []
-        for msg in raw_sequence:
+        for i, msg in enumerate(raw_sequence):
             msg_copy = msg.copy()
+            is_latest = (i == len(raw_sequence) - 1)
             
             # A. Safely handle multimodal lists WITHOUT destroying images
             if isinstance(msg_copy.content, list):
@@ -222,7 +258,10 @@ async def agent_node(state: dict) -> dict:
                         if item.get("type") == "text" and item.get("text"):
                             new_content.append({"type": "text", "text": item["text"]})
                         elif item.get("type") == "image_url":
-                            new_content.append(item) 
+                            if is_latest:
+                                new_content.append(item) 
+                            else:
+                                new_content.append({"type": "text", "text": "[Image Omitted to Save Context Window]"})
                     elif isinstance(item, str) and item.strip():
                         new_content.append({"type": "text", "text": item})
                 msg_copy.content = new_content if new_content else " "
@@ -266,7 +305,7 @@ async def agent_node(state: dict) -> dict:
                 if prev_type == "human":
                     consolidated_messages[-1] = HumanMessage(content=merged_content)
                 else:
-                    msg.content = merged_content if merged_content else " "
+                    msg.content = merged_content
                     consolidated_messages[-1] = msg
             else:
                 consolidated_messages.append(msg)
@@ -277,9 +316,14 @@ async def agent_node(state: dict) -> dict:
         result = await llm_with_tools.ainvoke(invoke_messages)
         logger.info(f"  -> Agent response generated ({len(str(result.content))} chars)")
         
+        # Pre-Router Scrub: if AI message is completely empty, make it explicitly empty
+        if getattr(result, "content", "") == " " or str(getattr(result, "content", "")).strip() == "":
+            result.content = ""
+            
         # Note: We return the raw un-merged human_msg to LangGraph state so DB checkpoints remain pure
         new_messages = [human_msg, result] if human_msg else [result]
-        
+
+        # Return to the graph and implicitly wipe the ephemeral buffers
         return {
             "messages": new_messages, 
             "tool_failure_count": 0, 
@@ -287,7 +331,9 @@ async def agent_node(state: dict) -> dict:
             "user_input": "", 
             "original_query": original_query,
             "active_skills": matched_skill_names,
-            "skill_prompts": skill_prompts
+            "skill_prompts": skill_prompts,
+            "last_tool_output": None,
+            "pending_user_feedback": None
         }
 
     except Exception as e:
