@@ -45,7 +45,6 @@ def schedule_reminder(message: str, time_str: str) -> str:
         with open(REMINDERS_FILE, "w") as f:
             json.dump(reminders, f, indent=2)
             
-        logger.info(f"📅 Reminder scheduled: '{message}' for {time_str}")
         return f"Successfully scheduled reminder '{message}' for '{time_str}'."
     except Exception as e:
         logger.error(f"Failed to schedule reminder: {e}")
@@ -82,7 +81,6 @@ async def save_to_long_term_memory(fact: str) -> str:
         mem_obj = TempMemoryObj()
         # Default to a generic source thread since active control is manual
         await memory_retrieval.store.apply_updates(mem_obj, source_thread_id="agent_manual_memory")
-        logger.info(f"🧠 Memory saved: '{fact}'")
         return f"Successfully saved to long-term memory: '{fact}'."
     except Exception as e:
         logger.error(f"Failed to save memory: {e}")

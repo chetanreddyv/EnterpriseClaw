@@ -252,7 +252,7 @@ async def direct_agent_invoke(chat_id: str, text: str, platform: str) -> dict:
             config=config,
             stream_mode="updates",
         ):
-            logger.debug(f"Graph event ({platform}): {graph_event}")
+            pass
 
         state = await graph.aget_state(config)
 
@@ -283,9 +283,8 @@ async def direct_agent_invoke(chat_id: str, text: str, platform: str) -> dict:
                     thread_id=str(chat_id),
                     content=response
                 )
-                logger.info(f"💬 Sent response to {platform} user {chat_id}")
             elif response.strip() == "HEARTBEAT_OK" or response == "IDLE":
-                logger.info(f"🔇 Suppressed internal heartbeat string from {platform} thread {chat_id}")
+                pass
 
             # 1. Fast History Write ONLY. Semantic extraction is now governed directly by the agent via `@tool`.
             
@@ -324,7 +323,7 @@ async def direct_resume_invoke(chat_id: str, decision: str, platform: str) -> di
             config=config,
             stream_mode="updates",
         ):
-            logger.debug(f"Resume event ({platform}): {graph_event}")
+            pass
 
         state = await graph.aget_state(config)
         if not state.next:
@@ -417,8 +416,6 @@ async def _poll_telegram():
                     logger.warning(f"⚠️ Ignored message from unauthorized chat_id: {chat_id}")
                     continue
 
-                logger.info(f"📩 Message from {chat_id}: {str(text)[:100]}")
-
                 # ── Handle Commands (e.g. /model) ──────────────────────────
                 if await _handle_commands(str(chat_id), text, "telegram"):
                     continue
@@ -504,7 +501,6 @@ async def webhook(request: Request):
     2. callback_query — User clicked an inline button → resume the graph
     """
     body = await request.json()
-    logger.info(f"📩 Webhook received")
 
     # ── Handle callback queries (button clicks) ──────────────
     if "callback_query" in body:
@@ -581,8 +577,6 @@ async def _handle_callback_query(callback_query: dict):
     decision = parts[0]
     thread_id = parts[1] if len(parts) > 1 else str(chat_id)
 
-    logger.info(f"🔘 Callback: {decision} from {chat_id} (thread: {thread_id})")
-
     # Acknowledge the button press immediately
     await telegram_client.answer_callback_query(
         callback_id, text=f"{'✅ Approved' if decision == 'approve' else '❌ Rejected' if decision == 'reject' else '✏️ Editing'}..."
@@ -633,8 +627,6 @@ async def chat_endpoint(thread_id: str, request: Request):
     if not user_input:
         return JSONResponse({"error": "Empty message"}, status_code=400)
 
-    logger.info(f"🌐 Gateway API request queued from {thread_id}: {user_input[:100]}")
-
     # ── Handle Commands (e.g. /model) ────────────────────────────
     if await _handle_commands(thread_id, user_input, "web"):
         return {"status": "command_handled"}
@@ -657,8 +649,6 @@ async def resume_hitl_endpoint(thread_id: str, request: Request):
     body = await request.json()
     decision = body.get("action", body.get("decision", "reject"))
 
-    logger.info(f"🌐 Gateway API resume queued: {decision} for thread {thread_id}")
-
     # Resume directly
     asyncio.create_task(direct_resume_invoke(thread_id, decision, "web"))
     
@@ -680,8 +670,6 @@ async def system_notify_endpoint(thread_id: str, request: Request):
 
     if not message:
         return JSONResponse({"error": "Empty message"}, status_code=400)
-
-    logger.info(f"🌐 Gateway API notification received for {thread_id} via {platform}")
 
     # Inject into LangGraph state directly so the agent remembers it
     from langchain_core.messages import AIMessage

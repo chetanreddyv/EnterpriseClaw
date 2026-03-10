@@ -213,21 +213,16 @@ class ZvecMemoryStore:
                 parts = res.id.split("|")
                 skill_id = parts[-1] if len(parts) > 1 else res.id
 
-                logger.debug(f"  -> Found match {res.id} (mapped to {skill_id}) with score {res.score:.3f}")
-
                 # Keyword fallback
                 query_lower = query.lower()
                 id_words = skill_id.lower().replace("_", " ").split()
                 keyword_match = any(w in query_lower for w in id_words if len(w) > 2)
 
                 if res.score < MEMORY_SIMILARITY_THRESHOLD and not keyword_match:
-                    logger.debug(f"  -> Skipping match {res.id} (below threshold {MEMORY_SIMILARITY_THRESHOLD} and no keyword match)")
                     continue
 
                 if skill_id not in skill_names:
                     skill_names.append(skill_id)
-                    reason = f"score={res.score:.3f}" if res.score >= MEMORY_SIMILARITY_THRESHOLD else "keyword match"
-                    logger.info(f"  -> Skill accepted: {skill_id} via trigger {res.id} ({reason})")
 
             skill_names = skill_names[:top_k]
 
@@ -256,7 +251,6 @@ class ZvecMemoryStore:
                     
                     prompts.append(f"## {skill_name.replace('_', ' ').title()}\n{content}")
                     matched_skill_names.append(skill_name)
-                    logger.info(f"  -> Retrieving dynamic skill prompt: {skill_file.name}")
 
             if not prompts:
                 return fallback
@@ -274,7 +268,6 @@ class ZvecMemoryStore:
         # 1. Tombstone obsolete items (soft delete)
         if memory.obsolete_items:
             await self.db.tombstone_by_content(memory.obsolete_items)
-            logger.info(f"  -> Tombstoned {len(memory.obsolete_items)} obsolete memories")
 
         # 2. Apply updates (evolve existing memories with new info)
         if hasattr(memory, 'updates') and memory.updates:
@@ -284,9 +277,7 @@ class ZvecMemoryStore:
                     existing_id = await self.db.item_exists_by_text(old_text)
                     if existing_id:
                         await self.db.update_item_text(existing_id, new_text)
-                        logger.info(f"  -> Updated memory {existing_id}: '{old_text[:40]}...' → '{new_text[:40]}...'")
                     else:
-                        logger.debug(f"  -> Update target not found, treating as new fact: '{new_text[:60]}'")
                         item_id = f"mem_{uuid.uuid4().hex[:12]}"
                         await self.db.insert_memory_item(item_id, 'fact', new_text, source_thread_id)
 
@@ -317,7 +308,6 @@ class ZvecMemoryStore:
                         for res in results:
                             if res.id != HEALTH_ID and res.score > 0.92:
                                 await self.db.touch_item(res.id)
-                                logger.info(f"  -> Semantic dedup (>0.92): updated existing item {res.id}")
                                 is_duplicate = True
                                 break
                     except Exception as e:
@@ -329,9 +319,6 @@ class ZvecMemoryStore:
                 item_id = f"mem_{uuid.uuid4().hex[:12]}"
                 await self.db.insert_memory_item(item_id, kind, text, source_thread_id)
                 inserted += 1
-
-        if inserted:
-            logger.info(f"  -> Inserted {inserted} new memory items into SQLite")
 
     async def sync_pending_memories(self, batch_size: int = 256):
         """Batch embed and sync memory_items -> Zvec in one fast locked operation."""
@@ -473,10 +460,6 @@ class ZvecMemoryStore:
 
         try:
             async with self._zvec_write_lock:
-                # We do not need to wipe the skill collection entirely, but since 
-                # we are changing the ID schema (adding ex_ prefix), it's safer to clear it.
-                # However, Zvec upsert will just append. We rely on the health check wipe on restart 
-                # or just accumulating them if the IDs overwrite.
                 self.skill_collection.upsert(docs_to_zvec)
                 self.skill_collection.flush()
             logger.info(f"✅ Embedded {len(docs_to_zvec)} skill vectors (including trigger examples)")

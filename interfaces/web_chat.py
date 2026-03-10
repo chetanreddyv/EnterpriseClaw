@@ -32,12 +32,11 @@ class WebClient(ClientInterface):
     """
     async def send_message(self, thread_id: str, content: str) -> None:
         # TODO: Upgrade to use FastAPI's StreamingResponse (Server-Sent Events) or WebSockets
-        # to instantly push the message (e.g. 🔔 **[Subagent Report]**) to the browser.
         # In a real app, this would push via WebSocket to `thread_id`
-        logger.info(f"🖥️ [WEB OUT] {thread_id}: {content[:100]}")
+        pass
 
     async def request_approval(self, thread_id: str, tool_name: str, args: Dict[str, Any]) -> None:
-        logger.info(f"🖥️ [WEB HITL] {thread_id} needs approval for {tool_name}")
+        pass
 
 web_client = WebClient()
 

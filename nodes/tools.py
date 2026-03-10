@@ -30,14 +30,12 @@ async def _execute_tool_func(action_name: str, tool_args: dict, config: dict):
         return f"Error: Tool '{action_name}' not found in registry."
     
     try:
-        logger.info(f"  -> Executing {action_name}({tool_args})")
         if hasattr(func, "ainvoke"):
             result = await func.ainvoke(tool_args, config=config)
         else:
             result = func(**tool_args)
             if inspect.isawaitable(result):
                 result = await result
-        logger.info(f"  -> {action_name} completed successfully")
         # Allow true LangChain multimodal blocks to pass through natively
         if isinstance(result, list):
             is_multimodal = len(result) > 0 and isinstance(result[0], dict) and "type" in result[0]
@@ -62,7 +60,6 @@ async def execute_tools_node(state: dict) -> dict:
     """
     Execute tool calls in the last AI message and append the results as ToolMessages.
     """
-    logger.info("--- [Node: Execute Tools] ---")
     messages = state.get("messages", [])
     if not messages:
         return {}

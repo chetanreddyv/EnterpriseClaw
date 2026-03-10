@@ -18,7 +18,6 @@ async def human_approval_node(state: dict) -> dict:
     """
     Pause the graph and wait for human approval via Telegram buttons.
     """
-    logger.info("--- [Node: Human Approval] ---")
     messages = state.get("messages", [])
     if not messages:
         return {}
@@ -26,7 +25,6 @@ async def human_approval_node(state: dict) -> dict:
     last_message = messages[-1]
     
     if not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
-        logger.warning("  -> No pending tool calls, skipping approval")
         return {}
 
     # Gather tool calls that caused this interrupt
@@ -48,7 +46,6 @@ async def human_approval_node(state: dict) -> dict:
 
     # ── PAUSE ── LangGraph saves state; resumes when user responds ──
     decision = interrupt(interrupt_payload)
-    logger.info(f"  -> Human decision received: {decision}")
 
     if decision == "approve":
         # On approve, we just return an action state or let the router guide it
@@ -59,7 +56,6 @@ async def human_approval_node(state: dict) -> dict:
 
     elif isinstance(decision, str) and decision.startswith("edit:"):
         edit_instruction = decision[5:].strip()
-        logger.info(f"  -> User requested edit: {edit_instruction}")
         
         # Append ToolMessages for all interrupted tools indicating feedback
         tool_messages = []
@@ -74,7 +70,6 @@ async def human_approval_node(state: dict) -> dict:
 
     else:
         # Rejected 
-        logger.info(f"  -> Action rejected (decision={decision!r})")
         tool_messages = []
         for call in last_message.tool_calls:
             tool_messages.append(

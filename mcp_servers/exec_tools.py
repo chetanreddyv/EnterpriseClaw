@@ -53,7 +53,6 @@ async def exec_command(
     Executes a shell command on the host system. 
     Returns the standard output and standard error.
     """
-    logger.info(f"Executing shell command: `{command}` (Background: {background}, Timeout: {timeout_seconds}s)")
     
     thread_id = config.get("configurable", {}).get("thread_id") if config else None
     platform = config.get("configurable", {}).get("platform", "telegram") if config else "telegram"

@@ -45,9 +45,7 @@ def web_search(query: str, max_results: int = 5) -> str:
     
     Args:
         query: The search query.
-        max_results: The maximum number of results to return (default: 5).
     """
-    logger.info(f"🛠️ web_search(query='{query}', max_results={max_results})")
     
     max_retries = 3
     results = []
@@ -83,7 +81,6 @@ def web_search(query: str, max_results: int = 5) -> str:
         lines.append(f"**{i}. [{title}]({href})**\n> {body}\n")
         
     out_str = "\n".join(lines)
-    logger.info(f"✅ web_search returned {len(results)} results")
     return out_str
 
 
@@ -94,7 +91,6 @@ def web_fetch(url: str) -> str:
     Args:
         url: The web page URL to fetch.
     """
-    logger.info(f"🛠️ web_fetch(url='{url}')")
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
@@ -127,7 +123,6 @@ def web_fetch(url: str) -> str:
 
         # 2. Fallback Extraction: BeautifulSoup + Markdownify (Best for non-articles/lists/docs)
         if not text_content:
-            logger.info("Trafilatura returned empty; falling back to BeautifulSoup + Markdownify.")
             soup = BeautifulSoup(html_content, "html.parser")
             
             # Strip extremely noisy elements
@@ -142,7 +137,6 @@ def web_fetch(url: str) -> str:
 
         text_content = _smart_truncate(text_content, max_chars=15000)
         
-        logger.info(f"✅ web_fetch extracted {len(text_content)} characters")
         return f"### Content of {url}:\n\n{text_content}"
 
     except httpx.TimeoutException:

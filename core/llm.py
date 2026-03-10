@@ -48,7 +48,6 @@ def init_agent_llm(model_string: str = None) -> BaseChatModel:
 
     try:
         llm = init_chat_model(actual_model, model_provider=provider, **init_kwargs)
-        logger.info(f"  -> LLM loaded: {model_string}")
         return llm
     except Exception as e:
         logger.error(f"  -> Failed to load '{model_string}', falling back to default. Error: {e}")

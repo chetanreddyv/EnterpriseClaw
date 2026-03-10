@@ -16,7 +16,6 @@ class ChannelManager:
     def register_client(self, platform_name: str, client: ClientInterface):
         """Register a client adapter for a specific platform."""
         self.clients[platform_name] = client
-        logger.info(f"🔌 Registered Channel Client: {platform_name}")
 
     async def send_message(self, platform: str, thread_id: str, content: str):
         """Route a standard text message to the appropriate platform."""

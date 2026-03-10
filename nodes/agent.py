@@ -113,7 +113,6 @@ async def agent_node(state: dict) -> dict:
     """
     Execute the LangChain agent with dynamically loaded skills + tools.
     """
-    logger.info("--- [Node: Agent] ---")
     
     messages = state.get("messages", [])
     user_input = state.get("user_input", "")
@@ -135,7 +134,6 @@ async def agent_node(state: dict) -> dict:
             user_input = f"[User Feedback from previous interruption]: {pending_feedback}"
         
     if not messages and not user_input and not original_query:
-        logger.debug("  -> Empty state and no user input, skipping agent loop.")
         return {}
         
     tool_failure_count = state.get("tool_failure_count", 0)
@@ -152,14 +150,9 @@ async def agent_node(state: dict) -> dict:
     try:
         from memory.retrieval import memory_retrieval
         memory_context = await memory_retrieval.get_context(thread_id=thread_id)
-        if memory_context != "No established context.":
-            logger.info(f"  -> Successfully retrieved memory context ({len(memory_context)} chars)")
             
         if matched_skill_names is None or skill_prompts is None:
             skill_prompts, matched_skill_names = await memory_retrieval.get_relevant_skills(original_query)
-            logger.info(f"  -> Skill prompts loaded ({len(skill_prompts)} chars): {skill_prompts[:200]}...")
-        else:
-            logger.info(f"  -> Using frozen active skills from state: {matched_skill_names}")
     except Exception as e:
         logger.warning(f"  -> Context/Skill retrieval skipped/failed: {e}")
         if matched_skill_names is None:
@@ -327,7 +320,6 @@ async def agent_node(state: dict) -> dict:
 
         # ── 3. Execute & Return ──────────────────────────────────────────────
         result = await llm_with_tools.ainvoke(invoke_messages)
-        logger.info(f"  -> Agent response generated ({len(str(result.content))} chars)")
         
         # Pre-Router Scrub: if AI message is completely empty, make it explicitly empty
         if getattr(result, "content", "") == " " or str(getattr(result, "content", "")).strip() == "":

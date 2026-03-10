@@ -76,7 +76,6 @@ class BrowserSessionManager:
             # Auto-handle dialogs (accept by default) unless explicitly managed
             cls._browser.on("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
             
-            logger.info(f"🌐 Playwright Chromium launched with persistent context (headless={is_headless})")
 
             # Start GC sweep
             if cls._gc_task is None:
@@ -107,7 +106,6 @@ class BrowserSessionManager:
                 "active_page_idx": 0,
                 "last_accessed": time.time(),
             }
-            logger.info(f"🌐 New browser page created for thread {thread_id}")
             return page
 
     @classmethod
@@ -125,7 +123,6 @@ class BrowserSessionManager:
                 try:
                     for p in entry["pages"]:
                         await p.close()
-                    logger.info(f"🌐 Browser pages closed for thread {thread_id}")
                 except Exception as e:
                     logger.warning(f"Error closing pages {thread_id}: {e}")
 
@@ -146,7 +143,6 @@ class BrowserSessionManager:
             await cls._playwright.stop()
             cls._playwright = None
         cls._default_page_used = False
-        logger.info("🌐 Playwright shut down cleanly")
 
     @classmethod
     async def _gc_loop(cls):
@@ -160,7 +156,6 @@ class BrowserSessionManager:
                     if (now - entry["last_accessed"]) > cls.IDLE_TIMEOUT_SECONDS
                 ]
                 for tid in stale:
-                    logger.info(f"🧹 GC: closing idle browser context for thread {tid}")
                     await cls.close_context(tid)
         except asyncio.CancelledError:
             pass
@@ -195,14 +190,12 @@ async def browser_navigate(
     Use this to open websites for reading, research, or preparing for interaction.
     """
     thread_id = _get_thread_id(config)
-    logger.info(f"🌐 browser_navigate(url='{url}', thread={thread_id})")
     try:
         page = await BrowserSessionManager.get_page(thread_id)
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         title = await page.title()
         text_content = await page.inner_text("body")
         text_content = _smart_truncate(text_content)
-        logger.info(f"✅ browser_navigate: loaded '{title}' ({len(text_content)} chars)")
         return f"## Page Loaded: {title}\n**URL**: {url}\n\n{text_content}"
     except Exception as e:
         logger.error(f"❌ browser_navigate failed: {e}")
@@ -237,7 +230,6 @@ async def browser_screenshot(
     Also saves the PNG to disk for user reference.
     """
     thread_id = _get_thread_id(config)
-    logger.info(f"🌐 browser_screenshot(thread={thread_id})")
     try:
         page = await BrowserSessionManager.get_page(thread_id)
         if page.url == "about:blank":
@@ -252,7 +244,6 @@ async def browser_screenshot(
 
         # Return multimodal content block for LLM vision
         b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
-        logger.info(f"✅ browser_screenshot saved to {filepath}")
         return [
             {"type": "text", "text": f"Screenshot of {page.url} (saved to {filepath}):"},
             {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
@@ -449,7 +440,6 @@ async def browser_click(
     This is a WRITE action and requires human approval.
     """
     thread_id = _get_thread_id(config)
-    logger.info(f"🌐 browser_click(selector='{selector}', thread={thread_id})")
     try:
         page = await BrowserSessionManager.get_page(thread_id)
         if page.url == "about:blank":
@@ -507,7 +497,6 @@ async def browser_type(
     This is a WRITE action and requires human approval.
     """
     thread_id = _get_thread_id(config)
-    logger.info(f"🌐 browser_type(selector='{selector}', text='{text[:50]}', thread={thread_id})")
     try:
         page = await BrowserSessionManager.get_page(thread_id)
         if page.url == "about:blank":
@@ -563,7 +552,6 @@ async def browser_execute_js(
     This is a WRITE action and requires human approval.
     """
     thread_id = _get_thread_id(config)
-    logger.info(f"🌐 browser_execute_js(thread={thread_id})")
     try:
         page = await BrowserSessionManager.get_page(thread_id)
         if page.url == "about:blank":
@@ -588,7 +576,6 @@ async def browser_select_option(
     This is a WRITE action and requires human approval.
     """
     thread_id = _get_thread_id(config)
-    logger.info(f"🌐 browser_select_option(selector='{selector}', value='{value}', thread={thread_id})")
     try:
         page = await BrowserSessionManager.get_page(thread_id)
         if page.url == "about:blank":
@@ -626,7 +613,6 @@ async def browser_press_key(
     This is a WRITE action and requires human approval.
     """
     thread_id = _get_thread_id(config)
-    logger.info(f"🌐 browser_press_key(key='{key}', thread={thread_id})")
     try:
         page = await BrowserSessionManager.get_page(thread_id)
         await page.keyboard.press(key)
@@ -649,7 +635,6 @@ async def browser_hover(
     This is a WRITE action and requires human approval.
     """
     thread_id = _get_thread_id(config)
-    logger.info(f"🌐 browser_hover(selector='{selector}', thread={thread_id})")
     try:
         page = await BrowserSessionManager.get_page(thread_id)
         if page.url == "about:blank":
@@ -730,7 +715,6 @@ async def browser_file_upload(
     This is a WRITE action and requires human approval.
     """
     thread_id = _get_thread_id(config)
-    logger.info(f"🌐 browser_file_upload(selector='{selector}', thread={thread_id})")
     try:
         page = await BrowserSessionManager.get_page(thread_id)
         if page.url == "about:blank":

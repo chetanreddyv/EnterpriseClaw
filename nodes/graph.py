@@ -159,7 +159,6 @@ def build_graph(checkpointer=None):
 
     # Compile with checkpointer
     graph = builder.compile(checkpointer=checkpointer)
-    logger.info("✅ LangGraph compiled successfully")
     return graph
 
 
@@ -178,5 +177,4 @@ def checkpointer_context(db_path: str = _DEFAULT_DB_PATH):
     Return an async context manager that opens an AsyncSqliteSaver.
     """
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    logger.info(f"📂 SQLite checkpointer will use → {db_path}")
     return AsyncSqliteSaver.from_conn_string(db_path)

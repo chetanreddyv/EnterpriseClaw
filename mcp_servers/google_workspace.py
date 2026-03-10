@@ -129,7 +129,6 @@ def list_messages(max_results: int, query: str, include_spam_trash: bool) -> str
         query: Standard Gmail search syntax (e.g. 'from:someone@example.com is:unread'). You MUST pass an empty string '' if no filter is needed.
         include_spam_trash: Whether to include spam and trash. You MUST provide True or False explicitly.
     """
-    logger.info(f"🛠️ list_messages(max_results={max_results}, query='{query}')")
     try:
         service = _get_gmail_service()
         resp = service.users().messages().list(
@@ -158,7 +157,6 @@ def list_messages(max_results: int, query: str, include_spam_trash: bool) -> str
             if snippet:
                 lines.append(f"  Snippet: {snippet}")
 
-        logger.info(f"✅ list_messages → {len(msgs)} results")
         return "\n".join(lines)
     except Exception as e:
         logger.error(f"❌ list_messages error: {e}")
@@ -171,7 +169,6 @@ def get_message(message_id: str) -> str:
     Args:
         message_id: The exact ID of the message to retrieve.
     """
-    logger.info(f"🛠️ get_message(message_id='{message_id}')")
     try:
         service = _get_gmail_service()
         msg = service.users().messages().get(userId="me", id=message_id, format="full").execute()
@@ -194,7 +191,6 @@ def get_message(message_id: str) -> str:
             "\n--- BODY ---",
             text_plain.strip() if text_plain else (text_html.strip() if text_html else "[No body]"),
         ]
-        logger.info("✅ get_message complete")
         return "\n".join(out)
     except Exception as e:
         logger.error(f"❌ get_message error: {e}")
@@ -211,7 +207,6 @@ def send_email(to: str, subject: str, body: str, cc: str, bcc: str) -> str:
         cc: Optional CC recipients (comma-separated). You MUST pass an empty string '' if there are no CCs.
         bcc: Optional BCC recipients (comma-separated). You MUST pass an empty string '' if there are no BCCs.
     """
-    logger.info(f"🛠️ send_email(to='{to}', subject='{subject}')")
     try:
         service = _get_gmail_service()
         msg = MIMEText(body, _subtype="plain", _charset="utf-8")
@@ -225,7 +220,6 @@ def send_email(to: str, subject: str, body: str, cc: str, bcc: str) -> str:
         raw = _b64url_encode(msg.as_bytes())
         sent = service.users().messages().send(userId="me", body={"raw": raw}).execute()
 
-        logger.info(f"✅ send_email → Message ID: {sent.get('id')}")
         return f"Email sent successfully. Message ID: {sent.get('id')}"
     except Exception as e:
         logger.error(f"❌ send_email error: {e}")
@@ -330,7 +324,6 @@ def list_events(max_results: int) -> str:
     Args:
         max_results: Maximum number of events to return. You MUST explicitly provide a reasonable integer like 10.
     """
-    logger.info(f"🛠️ list_events(max_results={max_results})")
     try:
         service = _get_calendar_service()
         now = datetime.datetime.utcnow().isoformat() + "Z"
@@ -351,7 +344,6 @@ def list_events(max_results: int) -> str:
             summary = event.get("summary", "(No title)")
             lines.append(f"- {start}: {summary}")
 
-        logger.info("✅ list_events complete")
         return "\n".join(lines)
     except Exception as e:
         logger.error(f"❌ list_events error: {e}")
@@ -367,7 +359,6 @@ def create_event(summary: str, start_time: str, end_time: str, description: str)
         end_time: End time in ISO 8601 format.
         description: Description of the event. You MUST pass an empty string '' if no description is needed.
     """
-    logger.info(f"🛠️ create_event(summary='{summary}', start='{start_time}')")
     try:
         service = _get_calendar_service()
         event = {
@@ -377,7 +368,6 @@ def create_event(summary: str, start_time: str, end_time: str, description: str)
             "end": {"dateTime": end_time, "timeZone": "UTC"},
         }
         created = service.events().insert(calendarId="primary", body=event).execute()
-        logger.info("✅ create_event complete")
         return f"Event created: {created.get('htmlLink')}"
     except Exception as e:
         logger.error(f"❌ create_event error: {e}")
@@ -394,7 +384,6 @@ def create_meeting(summary: str, start_time: str, end_time: str, attendees_csv: 
         attendees_csv: Comma-separated list of email addresses to invite. You MUST pass an empty string '' if no attendees.
         description: Description of the meeting. You MUST pass an empty string '' if no description is needed.
     """
-    logger.info(f"🛠️ create_meeting(summary='{summary}')")
     try:
         service = _get_calendar_service()
         
@@ -420,7 +409,6 @@ def create_meeting(summary: str, start_time: str, end_time: str, attendees_csv: 
         ).execute()
 
         meet_link = created.get("hangoutLink", "No link generated")
-        logger.info("✅ create_meeting complete")
         return f"Meeting created: {created.get('htmlLink')}\nGoogle Meet Link: {meet_link}"
     except Exception as e:
         logger.error(f"❌ create_meeting error: {e}")
