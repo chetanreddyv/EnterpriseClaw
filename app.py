@@ -288,7 +288,16 @@ async def direct_agent_invoke(chat_id: str, text: str, platform: str) -> dict:
                 logger.info(f"🔇 Suppressed internal heartbeat string from {platform} thread {chat_id}")
 
             # 1. Fast History Write ONLY. Semantic extraction is now governed directly by the agent via `@tool`.
-            await memory_retrieval.db.add_history(str(chat_id), "user", text)
+            
+            # Safely handle multimodal list (images) for DB text insertion
+            if isinstance(text, list):
+                db_text = " ".join([i.get("text", "") for i in text if isinstance(i, dict) and i.get("type", "") == "text"]).strip()
+                if not db_text:
+                    db_text = "[Media Payload]"
+            else:
+                db_text = str(text)
+
+            await memory_retrieval.db.add_history(str(chat_id), "user", db_text)
             await memory_retrieval.db.add_history(str(chat_id), "assistant", response)
             
             return {"response": response}

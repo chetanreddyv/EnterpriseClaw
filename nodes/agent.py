@@ -8,7 +8,7 @@ and executes the agent via LangChain.
 import json
 import logging
 from pathlib import Path
-from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
+from langchain_core.messages import SystemMessage, AIMessage, HumanMessage, RemoveMessage
 from core.llm import init_agent_llm
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ def _get_enabled_tools_and_write_actions(active_skills: list[str] = None, load_a
     Returns enabled tools and write actions dynamically based on active skills.
     Defaults to Standard Library if no skills are active.
     """
-    enabled_tools = {"exec_command", "web_search", "web_fetch", "check_current_time", "schedule_reminder", "save_to_long_term_memory"}
+    enabled_tools = {"save_to_long_term_memory", "check_current_time"}
     
     # Tiered Autonomy: Only OS-level destructive and active browsing actions require HITL
     dangerous_actions = {
@@ -180,7 +180,6 @@ async def agent_node(state: dict) -> dict:
         "## Active Memory & Temporal Awareness\n"
         "You have direct control over your long-term memory and schedule.\n"
         "- If you learn an important fact, preference, or rule about the user, ALWAYS use the `save_to_long_term_memory` tool to remember it permanently.\n"
-        "- If you need to perform actions in the future (e.g., 'remind me tonight', 'check email in 1 hour'), use the `schedule_reminder` tool.\n"
         "- If you need to orient yourself chronologically, use the `check_current_time` tool."
     )
     prompt_parts.append(active_memory_prompt)
@@ -200,7 +199,7 @@ async def agent_node(state: dict) -> dict:
         )
     
     # We append extra formatting rules if we want
-    full_system_prompt = "\n\n---\n\n".join(prompt_parts) + "\n\nALWAYS format your output using standard Markdown (use *, _, `, ```, lists). Do NOT use HTML tags. Respond directly to the user."
+    full_system_prompt = "\n\n---\n\n".join(prompt_parts) + "\n\nALWAYS format your output using standard Markdown (use *, _, `, ```, lists). Do NOT use HTML tags. Respond directly to the user.\n\nCRITICAL: Be concise. Keep conversational responses under 2 sentences unless the user explicitly asks for detail."
 
     # ── Build LangChain Tools ─────────────────────────────────────
     enabled_tool_names, _ = _get_enabled_tools_and_write_actions(active_skills=matched_skill_names)
@@ -225,11 +224,23 @@ async def agent_node(state: dict) -> dict:
         # ── 2. Compile & Truncate Messages ───────────────────────────────────
         invoke_messages = [SystemMessage(content=full_system_prompt)]
         
-        # Sliding window truncation (last 5 turns) to prevent context bloat
-        MAX_TURNS = 5
+        # Sliding window truncation (last 4 turns) to prevent context bloat
+        MAX_TURNS = 4
         human_indices = [i for i, m in enumerate(messages) if getattr(m, "type", "") == "human"]
-        recent_messages = messages[human_indices[-MAX_TURNS]:] if len(human_indices) > MAX_TURNS else messages
         
+        recent_messages = messages
+        messages_to_delete = []
+
+        if len(human_indices) > MAX_TURNS:
+            cutoff_index = human_indices[-MAX_TURNS]
+            recent_messages = messages[cutoff_index:]
+            
+            # GC: Mark older messages (except SystemMessage) for permanent deletion from SQLite state
+            stale_messages = messages[:cutoff_index]
+            for msg in stale_messages:
+                if not isinstance(msg, SystemMessage) and getattr(msg, "id", None):
+                    messages_to_delete.append(RemoveMessage(id=msg.id))
+                    
         # Token-based truncation safety net (Pattern 1)
         from langchain_core.messages import trim_messages
         recent_messages = trim_messages(
@@ -322,6 +333,10 @@ async def agent_node(state: dict) -> dict:
             
         # Note: We return the raw un-merged human_msg to LangGraph state so DB checkpoints remain pure
         new_messages = [human_msg, result] if human_msg else [result]
+        
+        # Inject the RemoveMessage commands to trigger LangGraph GC
+        if messages_to_delete:
+            new_messages.extend(messages_to_delete)
 
         # Return to the graph and implicitly wipe the ephemeral buffers
         return {
