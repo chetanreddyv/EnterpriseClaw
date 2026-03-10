@@ -241,14 +241,16 @@ async def agent_node(state: dict) -> dict:
                 if not isinstance(msg, SystemMessage) and getattr(msg, "id", None):
                     messages_to_delete.append(RemoveMessage(id=msg.id))
                     
-        # Token-based truncation safety net (Pattern 1)
+        # Token-based truncation safety net
         from langchain_core.messages import trim_messages
         recent_messages = trim_messages(
             recent_messages,
             max_tokens=8000, 
             strategy="last",
             token_counter=lambda msgs: sum(len(str(m.content)) for m in msgs), # rough character heuristic
-            include_system=False
+            include_system=True,
+            start_on="human",
+            allow_partial=False
         )
 
         human_msg = HumanMessage(content=user_input) if user_input else None
@@ -348,13 +350,15 @@ async def agent_node(state: dict) -> dict:
             "active_skills": matched_skill_names,
             "skill_prompts": skill_prompts,
             "last_tool_output": None,
-            "pending_user_feedback": None
+            "pending_user_feedback": None,
+            "_retry": False
         }
 
     except Exception as e:
         tool_failure_count += 1
         logger.error(f"  -> Agent error (attempt {tool_failure_count}/3): {e}", exc_info=True)
 
+        # Clear the retry flag entirely if we hit max failures to allow smooth exit
         if tool_failure_count >= 3:
             logger.error("  -> Max failures reached, returning fallback response")
             fallback_msg = AIMessage(content="I encountered an error processing your request. Please try again.")
@@ -364,7 +368,8 @@ async def agent_node(state: dict) -> dict:
                 "messages": new_msgs, 
                 "tool_failure_count": 0, 
                 "user_input": "",
-                "original_query": original_query
+                "original_query": original_query,
+                "_retry": False
             }
 
         return {

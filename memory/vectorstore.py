@@ -209,22 +209,25 @@ class ZvecMemoryStore:
                 if res.id == HEALTH_ID:
                     continue
 
-                logger.debug(f"  -> Found skill {res.id} with score {res.score:.3f}")
+                # Parse the composite ID (e.g., "ex_0|web_tools" -> "web_tools")
+                parts = res.id.split("|")
+                skill_id = parts[-1] if len(parts) > 1 else res.id
+
+                logger.debug(f"  -> Found match {res.id} (mapped to {skill_id}) with score {res.score:.3f}")
 
                 # Keyword fallback
                 query_lower = query.lower()
-                id_words = res.id.lower().replace("_", " ").split()
+                id_words = skill_id.lower().replace("_", " ").split()
                 keyword_match = any(w in query_lower for w in id_words if len(w) > 2)
 
                 if res.score < MEMORY_SIMILARITY_THRESHOLD and not keyword_match:
-                    logger.debug(f"  -> Skipping skill {res.id} (below threshold {MEMORY_SIMILARITY_THRESHOLD} and no keyword match)")
+                    logger.debug(f"  -> Skipping match {res.id} (below threshold {MEMORY_SIMILARITY_THRESHOLD} and no keyword match)")
                     continue
 
-                skill_id = res.id
                 if skill_id not in skill_names:
                     skill_names.append(skill_id)
                     reason = f"score={res.score:.3f}" if res.score >= MEMORY_SIMILARITY_THRESHOLD else "keyword match"
-                    logger.info(f"  -> Skill accepted: {skill_id} ({reason})")
+                    logger.info(f"  -> Skill accepted: {skill_id} via trigger {res.id} ({reason})")
 
             skill_names = skill_names[:top_k]
 
@@ -246,6 +249,11 @@ class ZvecMemoryStore:
 
                 if skill_file and skill_file.exists():
                     content = skill_file.read_text()
+                    
+                    # Remove the trigger block before giving it to the LLM
+                    import re
+                    content = re.sub(r'### TRIGGER_EXAMPLES.*?### END_TRIGGER_EXAMPLES', '', content, flags=re.DOTALL).strip()
+                    
                     prompts.append(f"## {skill_name.replace('_', ' ').title()}\n{content}")
                     matched_skill_names.append(skill_name)
                     logger.info(f"  -> Retrieving dynamic skill prompt: {skill_file.name}")
@@ -401,21 +409,28 @@ class ZvecMemoryStore:
 
         import re
         skills_to_embed = []
-        skill_ids = []
+        doc_ids = []
 
-        for skill_file in SKILLS_DIR.rglob("*"):
-            if skill_file.name.lower() != "skill.md":
+        for skill_dir in SKILLS_DIR.iterdir():
+            if not skill_dir.is_dir():
                 continue
-
-            skill_id = skill_file.parent.name
+                
+            skill_id = skill_dir.name
             if skill_id == "identity":
                 continue
 
-            content = skill_file.read_text()
+            skill_file = skill_dir / "SKILL.md"
+            if not skill_file.exists():
+                skill_file = skill_dir / "skill.md"
+            
+            if not skill_file.exists():
+                continue
 
+            content = skill_file.read_text()
             name = skill_id
             description = "Detailed documentation for the skill."
 
+            # 1. Parse Frontmatter
             if content.startswith("---"):
                 parts = content.split("---", 2)
                 if len(parts) >= 3:
@@ -427,9 +442,25 @@ class ZvecMemoryStore:
                     if desc_match:
                         description = desc_match.group(1).strip()
 
+            # 2. Extract Trigger Examples
+            trigger_match = re.search(r'### TRIGGER_EXAMPLES(.*?)### END_TRIGGER_EXAMPLES', content, re.DOTALL)
+            
+            if trigger_match:
+                raw_examples = trigger_match.group(1).strip().split('\n')
+                for i, ex in enumerate(raw_examples):
+                    clean_ex = ex.replace('-', '').replace('"', '').strip()
+                    if clean_ex:
+                        # Append the independent trigger vector
+                        skills_to_embed.append(clean_ex)
+                        # We use a composite ID so we can extract the parent skill_id later
+                        # Format: example_index|skill_id
+                        doc_ids.append(f"ex_{i}|{skill_id}")
+            
+            # 3. Embed the base summary as a fallback
             summary = f"Skill: {name}\nDescription: {description}"
             skills_to_embed.append(summary)
-            skill_ids.append(skill_id)
+            # Format: sum|skill_id
+            doc_ids.append(f"sum|{skill_id}")
 
         if not skills_to_embed:
             return
@@ -437,14 +468,18 @@ class ZvecMemoryStore:
         embeddings = await self._embed(skills_to_embed)
 
         docs_to_zvec = []
-        for s_id, vector in zip(skill_ids, embeddings):
-            docs_to_zvec.append(zvec.Doc(id=s_id, vectors={"embedding": vector}))
+        for d_id, vector in zip(doc_ids, embeddings):
+            docs_to_zvec.append(zvec.Doc(id=d_id, vectors={"embedding": vector}))
 
         try:
             async with self._zvec_write_lock:
+                # We do not need to wipe the skill collection entirely, but since 
+                # we are changing the ID schema (adding ex_ prefix), it's safer to clear it.
+                # However, Zvec upsert will just append. We rely on the health check wipe on restart 
+                # or just accumulating them if the IDs overwrite.
                 self.skill_collection.upsert(docs_to_zvec)
                 self.skill_collection.flush()
-            logger.info(f"✅ Embedded {len(docs_to_zvec)} skill summaries for Progressive Disclosure")
+            logger.info(f"✅ Embedded {len(docs_to_zvec)} skill vectors (including trigger examples)")
         except Exception as e:
             logger.error(f"Zvec skills insert failed: {e}")
 
