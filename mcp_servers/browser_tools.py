@@ -27,6 +27,18 @@ logger = logging.getLogger("mcp.browser_tools")
 SCREENSHOT_DIR = Path("./data/screenshots")
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
+# Protocol separator for decoupling action summaries from heavy observations.
+# The worker_tools_node splits on this: left → ToolMessage, right → state["observation"]
+OBSERVATION_SEPARATOR = "\n===OBSERVATION===\n"
+
+
+async def _capture_snapshot(config) -> str:
+    """Capture an A11y snapshot of the current page for forced observation."""
+    try:
+        return await browser_snapshot.ainvoke({}, config=config)
+    except Exception as e:
+        return f"(Snapshot capture failed: {e})"
+
 
 # ══════════════════════════════════════════════════════════════
 # Browser Session Manager (Singleton)
@@ -449,34 +461,44 @@ async def browser_click(
         if double_click:
             click_kwargs["click_count"] = 2
 
+        summary = None
+
         # Strategy 1: CSS selector
         try:
             await page.click(selector, **click_kwargs)
             await page.wait_for_load_state("domcontentloaded", timeout=10000)
-            return f"✅ Clicked `{selector}`. Page: **{await page.title()}** ({page.url})"
+            summary = f"✅ Clicked `{selector}`. Page: **{await page.title()}** ({page.url})"
         except Exception:
             pass
 
         # Strategy 2: Visible text
-        try:
-            locator = page.get_by_text(selector, exact=False).first
-            await locator.click(**click_kwargs)
-            await page.wait_for_load_state("domcontentloaded", timeout=10000)
-            return f"✅ Clicked text '{selector}'. Page: **{await page.title()}** ({page.url})"
-        except Exception:
-            pass
-
-        # Strategy 3: Role-based
-        for role in ["link", "button", "menuitem"]:
+        if not summary:
             try:
-                locator = page.get_by_role(role, name=selector).first
+                locator = page.get_by_text(selector, exact=False).first
                 await locator.click(**click_kwargs)
                 await page.wait_for_load_state("domcontentloaded", timeout=10000)
-                return f"✅ Clicked {role} '{selector}'. Page: **{await page.title()}** ({page.url})"
+                summary = f"✅ Clicked text '{selector}'. Page: **{await page.title()}** ({page.url})"
             except Exception:
-                continue
+                pass
 
-        return f"❌ Could not find element matching '{selector}'. Try browser_snapshot to inspect the page."
+        # Strategy 3: Role-based
+        if not summary:
+            for role in ["link", "button", "menuitem"]:
+                try:
+                    locator = page.get_by_role(role, name=selector).first
+                    await locator.click(**click_kwargs)
+                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                    summary = f"✅ Clicked {role} '{selector}'. Page: **{await page.title()}** ({page.url})"
+                    break
+                except Exception:
+                    continue
+
+        if not summary:
+            return f"❌ Could not find element matching '{selector}'. Try browser_snapshot to inspect the page."
+
+        # ── FORCED OBSERVATION: Capture new page state ──
+        snapshot = await _capture_snapshot(config)
+        return f"{summary}{OBSERVATION_SEPARATOR}{snapshot}"
     except Exception as e:
         return f"Failed to click '{selector}': {type(e).__name__} - {str(e)}"
 
@@ -532,12 +554,15 @@ async def browser_type(
         if not filled:
             return f"❌ Could not find input matching '{selector}'. Try browser_snapshot to inspect the page."
 
-        result = f"✅ Typed '{text}' into `{selector}`."
+        summary = f"✅ Typed '{text}' into `{selector}`."
         if submit:
             await page.keyboard.press("Enter")
             await page.wait_for_load_state("domcontentloaded", timeout=10000)
-            result += f" Submitted. Page: **{await page.title()}** ({page.url})"
-        return result
+            summary += f" Submitted. Page: **{await page.title()}** ({page.url})"
+
+        # ── FORCED OBSERVATION: Capture new page state ──
+        snapshot = await _capture_snapshot(config)
+        return f"{summary}{OBSERVATION_SEPARATOR}{snapshot}"
     except Exception as e:
         return f"Failed to type into '{selector}': {type(e).__name__} - {str(e)}"
 
@@ -581,20 +606,28 @@ async def browser_select_option(
         if page.url == "about:blank":
             return "No page is currently loaded. Use browser_navigate first."
 
+        summary = None
+
         # Try by label (visible text) first, then by value attribute
         try:
             await page.select_option(selector, label=value, timeout=5000)
-            return f"✅ Selected '{value}' from `{selector}`."
+            summary = f"✅ Selected '{value}' from `{selector}`."
         except Exception:
             pass
 
-        try:
-            await page.select_option(selector, value=value, timeout=5000)
-            return f"✅ Selected value='{value}' from `{selector}`."
-        except Exception:
-            pass
+        if not summary:
+            try:
+                await page.select_option(selector, value=value, timeout=5000)
+                summary = f"✅ Selected value='{value}' from `{selector}`."
+            except Exception:
+                pass
 
-        return f"❌ Could not select '{value}' in `{selector}`. Verify the selector and available options."
+        if not summary:
+            return f"❌ Could not select '{value}' in `{selector}`. Verify the selector and available options."
+
+        # ── FORCED OBSERVATION: Capture new page state ──
+        snapshot = await _capture_snapshot(config)
+        return f"{summary}{OBSERVATION_SEPARATOR}{snapshot}"
     except Exception as e:
         return f"Failed to select option: {type(e).__name__} - {str(e)}"
 
@@ -617,7 +650,11 @@ async def browser_press_key(
         page = await BrowserSessionManager.get_page(thread_id)
         await page.keyboard.press(key)
         await asyncio.sleep(0.3)
-        return f"✅ Pressed '{key}'."
+        summary = f"✅ Pressed '{key}'."
+
+        # ── FORCED OBSERVATION: Capture new page state ──
+        snapshot = await _capture_snapshot(config)
+        return f"{summary}{OBSERVATION_SEPARATOR}{snapshot}"
     except Exception as e:
         return f"Failed to press key '{key}': {type(e).__name__} - {str(e)}"
 
@@ -640,22 +677,30 @@ async def browser_hover(
         if page.url == "about:blank":
             return "No page is currently loaded. Use browser_navigate first."
 
+        summary = None
+
         # Try CSS selector
         try:
             await page.hover(selector, timeout=5000)
-            return f"✅ Hovering over `{selector}`. Use browser_get_text or browser_screenshot to see the result."
+            summary = f"✅ Hovering over `{selector}`."
         except Exception:
             pass
 
         # Try text matching
-        try:
-            locator = page.get_by_text(selector, exact=False).first
-            await locator.hover(timeout=5000)
-            return f"✅ Hovering over text '{selector}'. Use browser_get_text or browser_screenshot to see the result."
-        except Exception:
-            pass
+        if not summary:
+            try:
+                locator = page.get_by_text(selector, exact=False).first
+                await locator.hover(timeout=5000)
+                summary = f"✅ Hovering over text '{selector}'."
+            except Exception:
+                pass
 
-        return f"❌ Could not find element matching '{selector}'. Try browser_snapshot to inspect the page."
+        if not summary:
+            return f"❌ Could not find element matching '{selector}'. Try browser_snapshot to inspect the page."
+
+        # ── FORCED OBSERVATION: Capture new page state ──
+        snapshot = await _capture_snapshot(config)
+        return f"{summary}{OBSERVATION_SEPARATOR}{snapshot}"
     except Exception as e:
         return f"Failed to hover: {type(e).__name__} - {str(e)}"
 

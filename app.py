@@ -8,18 +8,15 @@ the messaging layer with the LangGraph agentic loop.
 import asyncio
 import logging
 from dotenv import load_dotenv
-
-# Load .env into os.environ BEFORE any other imports that read env vars
 load_dotenv()
 from contextlib import asynccontextmanager
-
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from langgraph.types import Command
-
 from config.settings import settings
 from interfaces.telegram import TelegramClient
-from nodes.graph import build_graph, checkpointer_context
+from core.graphs.supervisor import build_supervisor_graph
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from core.channel_manager import channel_manager
 from core.llm import extract_response
 
@@ -30,8 +27,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Suppress verbose Pydantic-to-Gemini schema warnings
-logging.getLogger("langchain_google_genai._function_utils").setLevel(logging.ERROR)
 
 # ── Globals (initialized at startup) ────────────────────────
 telegram_client: TelegramClient = None
@@ -68,30 +63,41 @@ async def _handle_commands(chat_id: str, text: str, platform: str) -> bool:
         return True
 
     if cmd == "/tools":
-        from nodes.agent import _get_enabled_tools_and_write_actions
-        enabled, write_actions = _get_enabled_tools_and_write_actions(load_all=True)
+        from core.hitl import get_tool_tier
+        from mcp_servers import GLOBAL_TOOL_REGISTRY
         approved = set((await graph.aget_state({"configurable": {"thread_id": chat_id}})).values.get("approved_tools") or [])
-        lines = [f"🔓 `{t}`" if t in approved else f" `{t}`" if t in write_actions else f"🟢 `{t}`" for t in sorted(enabled)]
-        await channel_manager.send_message(platform, chat_id, "🛠️ **Tool Permissions (This Thread)**\n" + "\n".join(lines))
+        all_tools = sorted(GLOBAL_TOOL_REGISTRY.keys())
+        lines = []
+        for t in all_tools:
+            tier = get_tool_tier(t)
+            if tier == "autonomous":
+                lines.append(f"🟢 `{t}`")
+            elif tier == "allowed":
+                lines.append(f"🔵 `{t}` (auto-allowed)")
+            elif t in approved:
+                lines.append(f"🔓 `{t}` (permitted)")
+            else:
+                lines.append(f"🔒 `{t}` (requires approval)")
+        await channel_manager.send_message(platform, chat_id, "🛠️ **Tool Permissions (This Thread)**\n🟢 Autonomous | 🔵 Allowed | 🔓 Permitted | 🔒 Requires Approval\n" + "\n".join(lines))
         return True
 
     if cmd == "/models":
-        import httpx
-        from config.settings import settings
-        base_url = settings.lm_studio_base_url
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(f"{base_url}/models", timeout=3.0)
-                response.raise_for_status()
-                data = response.json()
-                models = [model.get("id") for model in data.get("data", [])]
-                if models:
-                    msg = "🧠 **Available Local Models (LM Studio)**:\n" + "\n".join([f"- `lmstudio/{m}`" for m in models])
-                else:
-                    msg = "🧠 No local models currently loaded in LM Studio."
-        except Exception as e:
-            msg = f"❌ Could not connect to LM Studio at `{base_url}`.\nEnsure it is running and the local server is started.\nError: `{e}`"
-        await channel_manager.send_message(platform, chat_id, msg)
+        configured = []
+        if settings.openai_api_key:
+            configured.append("openai")
+        if settings.google_api_key:
+            configured.append("google")
+        if settings.claude_api_key:
+            configured.append("claude")
+        if settings.lm_studio_base_url:
+            configured.append("lm_studio")
+
+        if configured:
+            final_msg = "🌐 **Configured Model Providers:**\n" + "\n".join([f"- `{m}`" for m in configured])
+        else:
+            final_msg = "No models available."
+
+        await channel_manager.send_message(platform, chat_id, final_msg)
         return True
 
     return False
@@ -110,7 +116,7 @@ async def lifespan(app: FastAPI):
     # ── Onboarding check ─────────────────────────────────────
     if settings.needs_onboarding:
         logger.warning("  ⚠️  EnterpriseClaw is not configured yet! Run the setup wizard:")
-        logger.warning("    uv run python onboarding.py")
+        logger.warning("  uv run python onboarding.py")
         logger.warning("  Or use CLI mode: uv run python onboarding.py --cli")
         # Yield to keep FastAPI alive but don't initialize anything
         yield
@@ -137,10 +143,16 @@ async def lifespan(app: FastAPI):
     logger.info(f"✅ Allowed chat IDs: {settings.allowed_chat_id_list}")
 
     # Open the SQLite checkpointer for the full lifespan of the app
-    async with checkpointer_context() as checkpointer:
+    import os
+    from pathlib import Path
+    db_path = os.getenv("DB_PATH", "./data/checkpoints_v2.db")
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    
+    async with AsyncSqliteSaver.from_conn_string(db_path) as cp:
+        checkpointer = cp
         # Build and compile the LangGraph with the persistent checkpointer
-        graph = build_graph(checkpointer=checkpointer)
-        logger.info("✅ LangGraph compiled with SQLite checkpointer")
+        graph = build_supervisor_graph(checkpointer=checkpointer)
+        logger.info("✅ Supervisor-Worker graph compiled with SQLite checkpointer")
 
         # Start Heartbeat Daemon
         heartbeat_task = asyncio.create_task(system_heartbeat())
@@ -213,11 +225,22 @@ async def system_heartbeat():
 
 
 # ==========================================================
-# 2. Direct Graph Executions (Replacing worker.py / lane_manager queues)
+# 2. Direct Graph Executions 
 # ==========================================================
 
-async def direct_agent_invoke(chat_id: str, text: str, platform: str) -> dict:
-    """Invokes the LangGraph state machine directly from a webhook route."""
+async def direct_agent_invoke(chat_id: str, text: str, platform: str, user_name: str = "User"):
+    """
+    Core entrypoint for processing a message from a user.
+    """
+    logger.info("📥")
+    logger.info("📥 [NEW USER REQUEST]")
+    logger.info(f"📥 From: '{user_name}' on {platform} (Thread: {chat_id})")
+    logger.info(f"📥 Message: {text}")
+    logger.info("📥")
+    
+    # 1. Handle Commands (e.g. /permit, /model, /clear)
+    if await _handle_commands(chat_id, text, platform):
+        return
     from memory.retrieval import memory_retrieval
     
     config = {"configurable": {"thread_id": str(chat_id), "platform": platform}}
@@ -245,9 +268,7 @@ async def direct_agent_invoke(chat_id: str, text: str, platform: str) -> dict:
             {
                 "chat_id": str(chat_id),
                 "user_input": text,
-                "tool_failure_count": 0,
-                "active_skills": None,
-                "skill_prompts": None,
+                "original_query": text,
             },
             config=config,
             stream_mode="updates",
@@ -702,9 +723,10 @@ async def run_cli():
     await memory_retrieval.initialize()
     channel_manager.register_client("cli", CLIClient())
     
-    async with checkpointer_context() as cp:
+    async with AsyncSqliteSaver.from_conn_string("./data/checkpoints_v2.db") as cp:
         checkpointer = cp
-        graph = build_graph(checkpointer=checkpointer)
+        graph = build_supervisor_graph()
+        graph.checkpointer = checkpointer
         chat_id = "cli_user"
         print("\n🦅 EnterpriseClaw CLI is ready! Type 'exit' to quit.\n")
 

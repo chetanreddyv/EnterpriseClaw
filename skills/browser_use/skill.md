@@ -4,6 +4,17 @@ description: Control a real web browser to navigate, interact with, and extract 
 tools: browser_navigate, browser_click, browser_type, browser_screenshot, browser_get_text, browser_execute_js, browser_go_back, browser_scroll, browser_wait_for, browser_snapshot, browser_tab_management, browser_select_option, browser_press_key, browser_hover, browser_handle_dialog, browser_file_upload
 ---
 
+### TRIGGER_EXAMPLES
+- "open a browser"
+- "navigate to google.com"
+- "click the sign in button on the page"
+- "fill out the search box with 'EnterpriseClaw'"
+- "take a screenshot of the current page"
+- "get a snapshot of the page elements"
+- "scroll down on the page"
+- "type 'hello' into the search bar and press enter"
+### END_TRIGGER_EXAMPLES
+
 # Browser Use Skill
 
 You can control a **real Chromium browser** to navigate websites, interact with page elements, fill forms, click buttons, select dropdowns, upload files, and extract content. Each conversation gets its own isolated browser session with separate cookies.

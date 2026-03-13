@@ -1,0 +1,183 @@
+warning: `VIRTUAL_ENV=/Users/chetan/Documents/GitHub/Personal_Assistant/.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+2026-03-13 15:16:34,543 - INFO - mcp_servers - ✅ Loaded 11 tools from plugin: google_workspace
+2026-03-13 15:16:34,555 - INFO - mcp_servers - ✅ Loaded 16 tools from plugin: browser_tools
+INFO:     Will watch for changes in these directories: ['/Users/chetan/Documents/GitHub/EnterpriseClaw']
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [59882] using WatchFiles
+2026-03-13 15:16:35,113 - INFO - mcp_servers - ✅ Loaded 11 tools from plugin: google_workspace
+2026-03-13 15:16:35,125 - INFO - mcp_servers - ✅ Loaded 16 tools from plugin: browser_tools
+INFO:     Started server process [59884]
+INFO:     Waiting for application startup.
+2026-03-13 15:16:35,166 - INFO - app - 🚀 Starting Personal Assistant...
+2026-03-13 15:16:35,166 - INFO - app - ✅ Telegram client initialized and registered
+2026-03-13 15:16:35,166 - INFO - app - ✅ Web client registered
+2026-03-13 15:16:35,390 - WARNING - memory.vectorstore - ⚠️ Wiping and recreating Zvec index at /Users/chetan/Documents/GitHub/EnterpriseClaw/data/zvec_skills...
+2026-03-13 15:16:35,450 - INFO - memory.vectorstore - 🔄 Refreshing skills index and RAM cache...
+2026-03-13 15:16:35,451 - INFO - memory.vectorstore - 📡 Loading FastEmbed model (BAAI/bge-small-en-v1.5)...
+2026-03-13 15:16:35,539 - INFO - watchfiles.main - 70 changes detected
+2026-03-13 15:16:35,682 - INFO - memory.vectorstore - ✅ Re-Embedded 44 skill vectors. Cache populated.
+2026-03-13 15:16:35,683 - INFO - app - ✅ MemoryRetrieval initialized
+2026-03-13 15:16:35,683 - INFO - app - ✅ Allowed chat IDs: [1346735748]
+2026-03-13 15:16:35,689 - INFO - app - ✅ Supervisor-Worker graph compiled with SQLite checkpointer
+2026-03-13 15:16:35,689 - INFO - app - 💓 System Heartbeat loop started
+2026-03-13 15:16:35,699 - INFO - app - 💓 Heartbeat daemon initialized. Pulse every 900s.
+2026-03-13 15:16:35,896 - INFO - watchfiles.main - 13 changes detected
+2026-03-13 15:16:36,031 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/deleteWebhook "HTTP/1.1 200 OK"
+2026-03-13 15:16:36,032 - INFO - app - ✅ Webhook cleared — using polling mode
+2026-03-13 15:16:36,033 - INFO - app - 🟢 Personal Assistant is ready! (polling mode)
+2026-03-13 15:16:36,033 - INFO - app - 📡 Polling Telegram for updates...
+INFO:     Application startup complete.
+2026-03-13 15:17:06,176 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:17:08,813 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:17:09,110 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/sendChatAction "HTTP/1.1 200 OK"
+2026-03-13 15:17:09,112 - INFO - app - 📥
+2026-03-13 15:17:09,113 - INFO - app - 📥 [NEW USER REQUEST]
+2026-03-13 15:17:09,113 - INFO - app - 📥 From: 'User' on telegram (Thread: 1346735748)
+2026-03-13 15:17:09,113 - INFO - app - 📥 Message: I wanna know the current gold price
+2026-03-13 15:17:09,113 - INFO - app - 📥
+2026-03-13 15:17:09,223 - INFO - memory.vectorstore - get_relevant_skills: Zvec query returned 10 raw results (top result score: 0.9467 id: ex_0--web_tools)
+2026-03-13 15:17:09,223 - INFO - core.nodes.supervisor_nodes - SupervisorIntent: Matched skills: ['web_tools', 'user_profile']
+2026-03-13 15:17:09,223 - INFO - core.nodes.supervisor_nodes - SupervisorIntent: Retrieved 425 bytes of memory context.
+2026-03-13 15:17:09,223 - INFO - core.nodes.supervisor_nodes - SupervisorIntent: Matched skills: ['web_tools', 'user_profile']
+2026-03-13 15:17:09,225 - INFO - core.nodes.supervisor_nodes - ════════════════════════════════════════════════════════════════════════════════
+2026-03-13 15:17:09,225 - INFO - core.nodes.supervisor_nodes - ═ [SUPERVISOR TRACE: PROMPT]
+2026-03-13 15:17:09,225 - INFO - core.nodes.supervisor_nodes - ═ 🧠 Active Model: lmstudio/qwen/qwen3.5
+2026-03-13 15:17:09,225 - INFO - core.nodes.supervisor_nodes - ═ 📊 System Prompt: 8191 chars
+2026-03-13 15:17:09,225 - INFO - core.nodes.supervisor_nodes - ═ 📜 Memory Context: 425 bytes | 🛠 Matched Skills: ['web_tools', 'user_profile']
+2026-03-13 15:17:09,225 - INFO - core.nodes.supervisor_nodes - ═ 💬 History: 5 messages retained.
+2026-03-13 15:17:09,225 - INFO - core.nodes.supervisor_nodes -    ═ [0] User: Yo claw how are you?...
+2026-03-13 15:17:09,225 - INFO - core.nodes.supervisor_nodes -    ═ [1] AI: I'm functioning well—ready to assist. What do you need?...
+2026-03-13 15:17:09,225 - INFO - core.nodes.supervisor_nodes -    ═ [2] User: Hello...
+2026-03-13 15:17:09,225 - INFO - core.nodes.supervisor_nodes -    ═ [3] AI: Hello! How can I help you today?...
+2026-03-13 15:17:09,225 - INFO - core.nodes.supervisor_nodes -    ═ [4] User: I wanna know the current gold price...
+2026-03-13 15:17:09,225 - INFO - core.nodes.supervisor_nodes - ════════════════════════════════════════════════════════════════════════════════
+2026-03-13 15:17:09,227 - INFO - core.llm - LLM: Resolving 'lmstudio/qwen/qwen3.5' -> [provider=openai, model=qwen/qwen3.5]
+2026-03-13 15:17:09,227 - INFO - core.llm - LLM: Custom Base URL: http://localhost:1234/v1
+2026-03-13 15:17:09,233 - INFO - watchfiles.main - 4 changes detected
+2026-03-13 15:17:09,588 - INFO - watchfiles.main - 5 changes detected
+2026-03-13 15:17:32,050 - INFO - httpx - HTTP Request: POST http://localhost:1234/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-13 15:17:32,066 - INFO - core.nodes.supervisor_nodes - ✨
+2026-03-13 15:17:32,066 - INFO - core.nodes.supervisor_nodes - ✨ [SUPERVISOR: LLM OUTPUT]
+2026-03-13 15:17:32,066 - INFO - core.nodes.supervisor_nodes - ✨ 🛠 Tool Calls: ['web_search']
+2026-03-13 15:17:32,066 - INFO - core.nodes.supervisor_nodes - ✨
+2026-03-13 15:17:32,068 - INFO - core.nodes.supervisor_nodes - 🛠️ Supervisor executing tool: web_search
+2026-03-13 15:17:32,136 - WARNING - primp.impersonate - Impersonate 'safari_18' does not exist, using 'random'
+2026-03-13 15:17:32,322 - INFO - primp - response: https://grokipedia.com/api/typeahead?query=current+gold+price+per+ounce+March+10+2026&limit=1 200
+2026-03-13 15:17:32,436 - INFO - primp - response: https://en.wikipedia.org/w/api.php?action=opensearch&profile=fuzzy&limit=1&search=current%20gold%20price%20per%20ounce%20March%2010%202026 200
+2026-03-13 15:17:32,673 - INFO - primp - response: https://search.yahoo.com/search;_ylt=rQ7GaIS8WnytyvxLwG65JGB_;_ylu=am7H1vIYR1f4TKu4wiNr4JDHnp7GM21mNHOR2_fL4LJEYUk?p=current+gold+price+per+ounce+March+10+2026 200
+2026-03-13 15:17:33,309 - INFO - core.nodes.supervisor_nodes - ════════════════════════════════════════════════════════════════════════════════
+2026-03-13 15:17:33,309 - INFO - core.nodes.supervisor_nodes - ═ [SUPERVISOR TRACE: PROMPT]
+2026-03-13 15:17:33,309 - INFO - core.nodes.supervisor_nodes - ═ 🧠 Active Model: lmstudio/qwen/qwen3.5
+2026-03-13 15:17:33,309 - INFO - core.nodes.supervisor_nodes - ═ 📊 System Prompt: 8191 chars
+2026-03-13 15:17:33,309 - INFO - core.nodes.supervisor_nodes - ═ 📜 Memory Context: 425 bytes | 🛠 Matched Skills: ['web_tools', 'user_profile']
+2026-03-13 15:17:33,309 - INFO - core.nodes.supervisor_nodes - ═ 💬 History: 5 messages retained.
+2026-03-13 15:17:33,309 - INFO - core.nodes.supervisor_nodes -    ═ [0] User: Hello...
+2026-03-13 15:17:33,309 - INFO - core.nodes.supervisor_nodes -    ═ [1] AI: Hello! How can I help you today?...
+2026-03-13 15:17:33,309 - INFO - core.nodes.supervisor_nodes -    ═ [2] User: I wanna know the current gold price...
+2026-03-13 15:17:33,310 - INFO - core.nodes.supervisor_nodes -    ═ [3] AI: ...
+2026-03-13 15:17:33,310 - INFO - core.nodes.supervisor_nodes -    ═ [4] Tool: ## Search Results for 'current gold price per ounce March 10 2026'
+
+**1. [Gold Spot Price Today | Li...
+2026-03-13 15:17:33,310 - INFO - core.nodes.supervisor_nodes - ════════════════════════════════════════════════════════════════════════════════
+2026-03-13 15:17:33,312 - INFO - core.llm - LLM: Resolving 'lmstudio/qwen/qwen3.5' -> [provider=openai, model=qwen/qwen3.5]
+2026-03-13 15:17:33,312 - INFO - core.llm - LLM: Custom Base URL: http://localhost:1234/v1
+2026-03-13 15:17:39,226 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:17:45,132 - INFO - httpx - HTTP Request: POST http://localhost:1234/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-13 15:17:45,138 - INFO - core.nodes.supervisor_nodes - ✨
+2026-03-13 15:17:45,139 - INFO - core.nodes.supervisor_nodes - ✨ [SUPERVISOR: LLM OUTPUT]
+2026-03-13 15:17:45,139 - INFO - core.nodes.supervisor_nodes - ✨ 📝 Response: As of March 10, 2026, the current gold price is approximately **$5,248 per ounce** (spot price). 
+
+*Source: [Bullion Exchanges](https://bullionexchanges.com/charts/gold-price)*
+2026-03-13 15:17:45,139 - INFO - core.nodes.supervisor_nodes - ✨
+2026-03-13 15:17:45,708 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/sendMessage "HTTP/1.1 200 OK"
+2026-03-13 15:17:45,829 - INFO - watchfiles.main - 2 changes detected
+2026-03-13 15:18:09,342 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:18:39,464 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:18:42,572 - INFO - watchfiles.main - 1 change detected
+2026-03-13 15:18:42,933 - INFO - watchfiles.main - 5 changes detected
+2026-03-13 15:19:09,581 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:19:39,693 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:20:09,807 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:20:39,942 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:21:10,059 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:21:40,199 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:21:42,929 - INFO - watchfiles.main - 1 change detected
+2026-03-13 15:21:43,289 - INFO - watchfiles.main - 5 changes detected
+2026-03-13 15:22:10,319 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:22:10,518 - INFO - watchfiles.main - 3 changes detected
+2026-03-13 15:22:40,525 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:23:10,635 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:23:40,754 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:24:10,888 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:24:41,018 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:24:43,269 - INFO - watchfiles.main - 1 change detected
+2026-03-13 15:24:43,633 - INFO - watchfiles.main - 5 changes detected
+2026-03-13 15:25:11,137 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:25:41,248 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:26:11,362 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:26:41,481 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:27:11,601 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:27:41,714 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:27:43,592 - INFO - watchfiles.main - 1 change detected
+2026-03-13 15:27:43,958 - INFO - watchfiles.main - 5 changes detected
+2026-03-13 15:28:11,826 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:28:41,954 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:29:12,326 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:29:42,445 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:30:12,558 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:30:42,676 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:30:43,984 - INFO - watchfiles.main - 1 change detected
+2026-03-13 15:30:44,341 - INFO - watchfiles.main - 5 changes detected
+2026-03-13 15:31:12,797 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:31:42,915 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:31:45,704 - INFO - app - 💓 Sending System Heartbeat to Agent...
+2026-03-13 15:31:45,709 - INFO - app - 📥
+2026-03-13 15:31:45,709 - INFO - app - 📥 [NEW USER REQUEST]
+2026-03-13 15:31:45,709 - INFO - app - 📥 From: 'User' on system (Thread: system_cron_thread)
+2026-03-13 15:31:45,710 - INFO - app - 📥 Message: [SYSTEM EVENT: HEARTBEAT. Check your schedule, read unread emails, and perform any necessary background tasks. If nothing needs doing, reply 'IDLE'.]
+2026-03-13 15:31:45,711 - INFO - app - 📥
+2026-03-13 15:31:45,900 - INFO - watchfiles.main - 2 changes detected
+2026-03-13 15:31:46,222 - INFO - memory.vectorstore - get_relevant_skills: Zvec query returned 10 raw results (top result score: 0.7601 id: sum--heartbeat)
+2026-03-13 15:31:46,223 - INFO - core.nodes.supervisor_nodes - SupervisorIntent: Matched skills: ['heartbeat', 'cron']
+2026-03-13 15:31:46,223 - INFO - core.nodes.supervisor_nodes - SupervisorIntent: Retrieved 23 bytes of memory context.
+2026-03-13 15:31:46,223 - INFO - core.nodes.supervisor_nodes - SupervisorIntent: Matched skills: ['heartbeat', 'cron']
+2026-03-13 15:31:46,238 - INFO - core.nodes.supervisor_nodes - ════════════════════════════════════════════════════════════════════════════════
+2026-03-13 15:31:46,238 - INFO - core.nodes.supervisor_nodes - ═ [SUPERVISOR TRACE: PROMPT]
+2026-03-13 15:31:46,238 - INFO - core.nodes.supervisor_nodes - ═ 🧠 Active Model: DEFAULT (lmstudio/qwen)
+2026-03-13 15:31:46,238 - INFO - core.nodes.supervisor_nodes - ═ 📊 System Prompt: 7064 chars
+2026-03-13 15:31:46,238 - INFO - core.nodes.supervisor_nodes - ═ 📜 Memory Context: 23 bytes | 🛠 Matched Skills: ['heartbeat', 'cron']
+2026-03-13 15:31:46,238 - INFO - core.nodes.supervisor_nodes - ═ 💬 History: 1 messages retained.
+2026-03-13 15:31:46,238 - INFO - core.nodes.supervisor_nodes -    ═ [0] User: [SYSTEM EVENT: HEARTBEAT. Check your schedule, read unread emails, and perform any necessary backgro...
+2026-03-13 15:31:46,238 - INFO - core.nodes.supervisor_nodes - ════════════════════════════════════════════════════════════════════════════════
+2026-03-13 15:31:46,243 - INFO - core.llm - LLM: Resolving 'lmstudio/qwen/qwen3.5' -> [provider=openai, model=qwen/qwen3.5]
+2026-03-13 15:31:46,243 - INFO - core.llm - LLM: Custom Base URL: http://localhost:1234/v1
+2026-03-13 15:31:46,356 - INFO - watchfiles.main - 5 changes detected
+2026-03-13 15:32:10,955 - INFO - httpx - HTTP Request: POST http://localhost:1234/v1/chat/completions "HTTP/1.1 200 OK"
+2026-03-13 15:32:10,979 - INFO - core.nodes.supervisor_nodes - ✨
+2026-03-13 15:32:10,980 - INFO - core.nodes.supervisor_nodes - ✨ [SUPERVISOR: LLM OUTPUT]
+2026-03-13 15:32:10,980 - INFO - core.nodes.supervisor_nodes - ✨ 📝 Response: HEARTBEAT_OK
+2026-03-13 15:32:10,980 - INFO - core.nodes.supervisor_nodes - ✨
+2026-03-13 15:32:11,083 - INFO - watchfiles.main - 2 changes detected
+2026-03-13 15:32:13,026 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:32:43,139 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:33:13,262 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:33:43,380 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:33:44,301 - INFO - watchfiles.main - 1 change detected
+2026-03-13 15:33:44,661 - INFO - watchfiles.main - 5 changes detected
+2026-03-13 15:34:13,512 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:34:43,634 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:35:13,752 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:35:43,876 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:36:13,999 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:36:44,123 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:36:44,674 - INFO - watchfiles.main - 1 change detected
+2026-03-13 15:36:45,036 - INFO - watchfiles.main - 5 changes detected
+2026-03-13 15:37:14,240 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:37:44,354 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:38:14,472 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:38:44,594 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:39:14,728 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:39:44,845 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"
+2026-03-13 15:39:45,129 - INFO - watchfiles.main - 1 change detected
+2026-03-13 15:39:45,490 - INFO - watchfiles.main - 5 changes detected
+2026-03-13 15:40:14,956 - INFO - httpx - HTTP Request: POST https://api.telegram.org/bot8590669453:AAFtjLNsQxcvONknqOi9YhOo1Mfg5j_AFvU/getUpdates "HTTP/1.1 200 OK"

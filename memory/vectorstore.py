@@ -10,7 +10,9 @@ import asyncio
 import math
 import os
 import uuid
-from typing import List
+import shutil
+import re
+from typing import List, Tuple
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -29,7 +31,18 @@ HEALTH_ID = "__health_check__"
 
 # Time-decay parameter: half-life of ~70 days (lambda = ln(2) / 70)
 TIME_DECAY_LAMBDA = 0.0099
-MEMORY_SIMILARITY_THRESHOLD = float(os.getenv("MEMORY_SIMILARITY_THRESHOLD", "0.82"))
+MEMORY_SIMILARITY_THRESHOLD = float(os.getenv("MEMORY_SIMILARITY_THRESHOLD", "0.60"))
+
+# Pre-compiled Regex Patterns (Performance optimization)
+TRIGGER_PATTERN = re.compile(r'### TRIGGER_EXAMPLES(.*?)### END_TRIGGER_EXAMPLES', re.DOTALL)
+NAME_PATTERN = re.compile(r"^name:\s*(.+)$", re.MULTILINE)
+DESC_PATTERN = re.compile(r"^description:\s*(.+)$", re.MULTILINE)
+
+
+def chunked_iterable(iterable, size):
+    """Yield successive n-sized chunks from an iterable."""
+    for i in range(0, len(iterable), size):
+        yield iterable[i:i + size]
 
 
 class ZvecMemoryStore:
@@ -41,17 +54,31 @@ class ZvecMemoryStore:
         self._needs_rebuild = False
         self._zvec_write_lock = asyncio.Lock()
 
-        # FastEmbed Client (Lightweight local BGE model)
-        self.embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-        self.dim = 384  # bge-small-en-v1.5 embedding dimension
+        # bge-small-en-v1.5 embedding dimension
+        self.dim = 384  
         self.health_vector = [1.0] + [0.0] * (self.dim - 1)
 
         self.skill_collection = None
+        self._embedding_model = None  # Lazy init
+        
+        # RAM Cache to prevent Disk I/O during retrievals
+        self._skill_cache = {}
+
+    # ─── Async Zvec Wrappers (Prevents Event Loop Blocking) ─────────────
+
+    async def _async_query(self, collection, query_obj, topk: int):
+        return await asyncio.to_thread(collection.query, query_obj, topk=topk)
+
+    async def _async_upsert_and_flush(self, collection, docs):
+        async with self._zvec_write_lock:
+            await asyncio.to_thread(collection.upsert, docs)
+            await asyncio.to_thread(collection.flush)
+
+    # ─── Lifecycle & Initialization ─────────────────────────────────────
 
     def _wipe_and_recreate(self, path: str, schema: zvec.CollectionSchema):
-        """Delete a corrupt Zvec directory and return a fresh collection."""
-        import shutil
-        logger.warning(f"⚠️  Corrupt Zvec index at {path} — wiping and recreating...")
+        """Delete a Zvec directory and return a fresh collection."""
+        logger.warning(f"⚠️ Wiping and recreating Zvec index at {path}...")
         shutil.rmtree(path, ignore_errors=True)
         return zvec.create_and_open(path=path, schema=schema)
 
@@ -86,7 +113,7 @@ class ZvecMemoryStore:
             if not self._probe_integrity(self.collection):
                 raise RuntimeError("Memory Zvec integrity probe failed")
         except Exception as e:
-            logger.warning(f"⚠️  zvec_index open/probe failed ({e}), rebuilding from SQLite...")
+            logger.warning(f"⚠️ zvec_index open/probe failed ({e}), rebuilding from SQLite...")
             self.collection = self._wipe_and_recreate(ZVEC_PATH, mem_schema)
             self._ensure_health_doc(self.collection)
             self._needs_rebuild = True
@@ -96,22 +123,31 @@ class ZvecMemoryStore:
             name="skill_memory",
             vectors=zvec.VectorSchema("embedding", zvec.DataType.VECTOR_FP32, self.dim),
         )
-        try:
-            self.skill_collection = zvec.open(path=ZVEC_SKILLS_PATH)
-            self._ensure_health_doc(self.skill_collection)
-            if not self._probe_integrity(self.skill_collection):
-                raise RuntimeError("Skill Zvec integrity probe failed")
-        except Exception as e:
-            logger.warning(f"⚠️  zvec_skills open failed ({e}), recreating...")
-            self.skill_collection = self._wipe_and_recreate(ZVEC_SKILLS_PATH, skill_schema)
-            self._ensure_health_doc(self.skill_collection)
+        # Always wipe skills on startup to prevent "Ghost Triggers" from deleted markdown files
+        self.skill_collection = self._wipe_and_recreate(ZVEC_SKILLS_PATH, skill_schema)
+        self._ensure_health_doc(self.skill_collection)
+
+    @property
+    def embedding_model(self):
+        """Lazy loader for the FastEmbed model."""
+        if self._embedding_model is None:
+            logger.info("📡 Loading FastEmbed model (BAAI/bge-small-en-v1.5)...")
+            try:
+                self._embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+            except Exception as e:
+                logger.error(f"❌ Failed to load FastEmbed model: {e}")
+        return self._embedding_model
 
     async def _embed(self, texts: List[str]) -> List[List[float]]:
-        """Generate local vector embeddings using FastEmbed."""
+        """Generate local vector embeddings using FastEmbed (Batched)."""
         if not texts:
             return []
 
-        def _get_embeddings():
+        if not self.embedding_model:
+            logger.error("_embed: Model not loaded, cannot embed.")
+            return []
+
+        def _get_embeddings_sync():
             try:
                 embeddings_generator = self.embedding_model.embed(texts)
                 return [emb.tolist() for emb in embeddings_generator]
@@ -119,34 +155,36 @@ class ZvecMemoryStore:
                 logger.error(f"FastEmbed failed: {e}")
                 return []
 
-        return await asyncio.to_thread(_get_embeddings)
+        return await asyncio.to_thread(_get_embeddings_sync)
 
     @staticmethod
     def _time_decay(updated_ts: str) -> float:
-        """Exponential decay multiplier based on age. Returns 0.0–1.0."""
         try:
             updated = datetime.fromisoformat(updated_ts)
             now = datetime.now(timezone.utc)
             days_old = max((now - updated).total_seconds() / 86400, 0)
             return math.exp(-TIME_DECAY_LAMBDA * days_old)
         except Exception:
-            return 0.5  # fallback for unparseable timestamps
+            return 0.5  
+
+    # ─── Core Retrieval ─────────────────────────────────────────────────
 
     async def get_relevant_context(self, query: str, top_k: int = 5) -> str:
-        """Hybrid retrieval: Zvec vector search + FTS5 BM25, merged via time-weighted RRF."""
         if not self.collection:
             return ""
 
-        vector = (await self._embed([query]))[0]
+        vectors = await self._embed([query])
+        if not vectors:
+            return ""
 
-        # 1. Vector search (Zvec)
+        # 1. Async Vector search (Zvec)
         zvec_ranked = []
         try:
-            results = self.collection.query(
-                zvec.VectorQuery("embedding", vector=vector),
-                topk=top_k * 2
+            results = await self._async_query(
+                self.collection, 
+                zvec.VectorQuery("embedding", vector=vectors[0]), 
+                top_k * 2
             )
-            # Filter by relevance threshold
             zvec_ranked = [res.id for res in results if res.id != HEALTH_ID and res.score >= MEMORY_SIMILARITY_THRESHOLD]
         except Exception as e:
             logger.error(f"Zvec query failed: {e}")
@@ -154,15 +192,12 @@ class ZvecMemoryStore:
         # 2. BM25 keyword search (FTS5)
         fts_results = await self.db.search_fts(query, limit=top_k * 2)
         fts_ranked = [r["id"] for r in fts_results]
-
-        # Collect timestamps from FTS results for time-decay
         fts_timestamps = {r["id"]: r.get("updated_ts", "") for r in fts_results}
 
-        # 3. Merge via Reciprocal Rank Fusion (RRF)
+        # 3. Merge via RRF
         rrf_scores = {}
         for rank, item_id in enumerate(zvec_ranked):
             rrf_scores[item_id] = rrf_scores.get(item_id, 0.0) + 1.0 / (60 + rank + 1)
-
         for rank, item_id in enumerate(fts_ranked):
             rrf_scores[item_id] = rrf_scores.get(item_id, 0.0) + 1.0 / (60 + rank + 1)
 
@@ -171,17 +206,15 @@ class ZvecMemoryStore:
         if not merged_ids:
             return ""
 
-        # 4. Retrieve active items from SQLite (with timestamps)
         items = await self.db.get_active_items_by_ids(merged_ids)
         if not items:
             return ""
 
-        # 5. Apply time-decay weighting to final ranking
+        # 4. Apply time-decay weighting
         scored_items = []
         for item in items:
             base_rrf = rrf_scores.get(item["id"], 0.0)
             decay = self._time_decay(item.get("updated_ts", ""))
-            # Blend: 70% relevance, 30% recency
             final_score = 0.7 * base_rrf + 0.3 * (base_rrf * decay)
             scored_items.append((final_score, item))
 
@@ -191,30 +224,36 @@ class ZvecMemoryStore:
         return "\n".join(f"- [{item['kind']}] {item['text']}" for item in top_items)
 
     async def get_relevant_skills(self, query: str, top_k: int = 2) -> tuple[str, list[str]]:
-        """Search Zvec for skills relevant to the query. Returns (prompt_string, matched_skill_names)."""
         fallback = ("You are a helpful personal assistant. Be concise and accurate.", [])
         if not self.skill_collection:
             return fallback
 
-        vector = (await self._embed([query]))[0]
+        vectors = await self._embed([query])
+        if not vectors:
+            return fallback
 
         try:
-            results = self.skill_collection.query(
-                zvec.VectorQuery("embedding", vector=vector),
+            results = await self._async_query(
+                self.skill_collection,
+                zvec.VectorQuery("embedding", vector=vectors[0]),
                 topk=top_k * 5
             )
 
             skill_names = []
+            if results:
+                logger.info(f"get_relevant_skills: Zvec query returned {len(results)} raw results (top result score: {results[0].score:.4f} id: {results[0].id})")
+            else:
+                logger.info("get_relevant_skills: Zvec query returned 0 raw results")
+            
+            query_lower = query.lower()
+
             for res in results:
                 if res.id == HEALTH_ID:
                     continue
 
-                # Parse the composite ID (e.g., "ex_0|web_tools" -> "web_tools")
-                parts = res.id.split("|")
-                skill_id = parts[-1] if len(parts) > 1 else res.id
-
+                skill_id = res.id.split("--")[-1]
+                
                 # Keyword fallback
-                query_lower = query.lower()
                 id_words = skill_id.lower().replace("_", " ").split()
                 keyword_match = any(w in query_lower for w in id_words if len(w) > 2)
 
@@ -225,31 +264,16 @@ class ZvecMemoryStore:
                     skill_names.append(skill_id)
 
             skill_names = skill_names[:top_k]
-
             if not skill_names:
-                logger.debug("  -> No skills above threshold — using general fallback")
                 return fallback
 
             prompts = []
             matched_skill_names = []
             for skill_name in skill_names:
-                skill_dir = SKILLS_DIR / skill_name
-                skill_file = None
-
-                if skill_dir.exists():
-                    for f in skill_dir.iterdir():
-                        if f.name.lower() == "skill.md":
-                            skill_file = f
-                            break
-
-                if skill_file and skill_file.exists():
-                    content = skill_file.read_text()
-                    
-                    # Remove the trigger block before giving it to the LLM
-                    import re
-                    content = re.sub(r'### TRIGGER_EXAMPLES.*?### END_TRIGGER_EXAMPLES', '', content, flags=re.DOTALL).strip()
-                    
-                    prompts.append(f"## {skill_name.replace('_', ' ').title()}\n{content}")
+                # 💥 NO DISK I/O HERE: Pull straight from RAM cache
+                cached_content = self._skill_cache.get(skill_name)
+                if cached_content:
+                    prompts.append(f"## {skill_name.replace('_', ' ').title()}\n{cached_content}")
                     matched_skill_names.append(skill_name)
 
             if not prompts:
@@ -261,15 +285,13 @@ class ZvecMemoryStore:
             logger.error(f"Zvec skills query failed: {e}")
             return fallback
 
-    async def apply_updates(self, memory, source_thread_id: str = None):
-        """Write to SQLite memory_items only. Zvec is synced deferred."""
-        from .extraction import ExtractedMemory
+    # ─── Data Ingestion & Sync ──────────────────────────────────────────
 
-        # 1. Tombstone obsolete items (soft delete)
+    async def apply_updates(self, memory, source_thread_id: str = None):
+        """Batch-optimized ingestion. Eliminates 'Double Embedding' penalty."""
         if memory.obsolete_items:
             await self.db.tombstone_by_content(memory.obsolete_items)
 
-        # 2. Apply updates (evolve existing memories with new info)
         if hasattr(memory, 'updates') and memory.updates:
             for update_str in memory.updates:
                 if "|||" in update_str:
@@ -281,47 +303,63 @@ class ZvecMemoryStore:
                         item_id = f"mem_{uuid.uuid4().hex[:12]}"
                         await self.db.insert_memory_item(item_id, 'fact', new_text, source_thread_id)
 
-        # 3. Ingest new items with kind classification
+        # 1. Gather all novel text to leverage FastEmbed batching
         kind_map = [
             (memory.preferences, 'pref'),
             (memory.facts, 'fact'),
             (memory.corrections, 'rule'),
         ]
 
-        inserted = 0
+        texts_to_check = []
         for items, kind in kind_map:
             for text in items:
                 existing_id = await self.db.item_exists_by_text(text)
                 if existing_id:
                     await self.db.touch_item(existing_id)
-                    continue
+                else:
+                    texts_to_check.append((text, kind))
 
-                # Semantic similarity check for deduplication
-                is_duplicate = False
-                if self.collection:
-                    try:
-                        vector = (await self._embed([text]))[0]
-                        results = self.collection.query(
-                            zvec.VectorQuery("embedding", vector=vector),
-                            topk=3
-                        )
-                        for res in results:
-                            if res.id != HEALTH_ID and res.score > 0.92:
-                                await self.db.touch_item(res.id)
-                                is_duplicate = True
-                                break
-                    except Exception as e:
-                        logger.error(f"Semantic dedup check failed: {e}")
+        if not texts_to_check or not self.collection:
+            return
 
-                if is_duplicate:
-                    continue
+        # 2. Batch Embed once
+        raw_texts = [t[0] for t in texts_to_check]
+        vectors = await self._embed(raw_texts)
 
+        # 3. Zvec Semantic Deduplication + Immediate Upsert
+        docs_to_upsert = []
+        item_ids_to_mark = []
+
+        for (text, kind), vector in zip(texts_to_check, vectors):
+            # Async check against index
+            results = await self._async_query(
+                self.collection, 
+                zvec.VectorQuery("embedding", vector=vector), 
+                topk=1
+            )
+            
+            is_dup = False
+            for res in results:
+                if res.id != HEALTH_ID and res.score > 0.92:
+                    await self.db.touch_item(res.id)
+                    is_dup = True
+                    break
+            
+            if not is_dup:
                 item_id = f"mem_{uuid.uuid4().hex[:12]}"
+                # Insert to SQLite and immediately mark as indexed since we have the vector
                 await self.db.insert_memory_item(item_id, kind, text, source_thread_id)
-                inserted += 1
+                item_ids_to_mark.append(item_id)
+                docs_to_upsert.append(zvec.Doc(id=item_id, vectors={"embedding": vector}))
+
+        # 4. Upsert directly to Zvec (Skips background sync for these items)
+        if docs_to_upsert:
+            await self._async_upsert_and_flush(self.collection, docs_to_upsert)
+            await self.db.mark_items_indexed(item_ids_to_mark)
+
 
     async def sync_pending_memories(self, batch_size: int = 256):
-        """Batch embed and sync memory_items -> Zvec in one fast locked operation."""
+        """Background worker for items that missed direct indexing."""
         if not self.collection:
             return
 
@@ -332,29 +370,21 @@ class ZvecMemoryStore:
         texts = [r["text"] for r in pending]
         ids = [r["id"] for r in pending]
 
-        # Embed outside the lock (expensive)
         vectors = await self._embed(texts)
         if not vectors:
             return
 
+        # Prevent silent corruption if embedding model drops a vector
+        assert len(ids) == len(vectors), "Fatal: Vector count mismatch during batch sync."
+
         docs = [zvec.Doc(id=i, vectors={"embedding": v}) for i, v in zip(ids, vectors)]
-
-        # Single locked write batch into Zvec + flush
-        async with self._zvec_write_lock:
-            try:
-                self._ensure_health_doc(self.collection)
-                self.collection.upsert(docs)
-                self.collection.flush()
-            except Exception as e:
-                logger.error(f"Zvec deferred sync failed: {e}")
-                return
-
-        # Mark as indexed in SQLite (after Zvec flush succeeds)
+        await self._async_upsert_and_flush(self.collection, docs)
         await self.db.mark_items_indexed(ids)
-        logger.info(f"✅ Synced {len(ids)} new memories into Zvec index")
+        logger.info(f"✅ Synced {len(ids)} pending memories into Zvec index")
+
 
     async def rebuild_from_sqlite(self):
-        """Re-populate zvec_index from the durable memory_items table."""
+        """Paginated re-population of zvec_index to prevent OOM."""
         logger.info("🔄 Rebuilding zvec_index from SQLite memory_items...")
 
         def _fetch_all():
@@ -363,114 +393,98 @@ class ZvecMemoryStore:
                 return cursor.fetchall()
 
         rows = await asyncio.to_thread(_fetch_all)
-
         if not rows:
-            logger.info("  -> No active memory_items found — fresh start.")
             self._needs_rebuild = False
             return
 
-        item_ids = [r[0] for r in rows]
-        texts    = [r[1] for r in rows]
+        total_upserted = 0
+        # Process in chunks of 512 to protect RAM
+        for chunk in chunked_iterable(rows, 512):
+            item_ids = [r[0] for r in chunk]
+            texts    = [r[1] for r in chunk]
 
-        embeddings = await self._embed(texts)
-        docs_to_zvec = [
-            zvec.Doc(id=item_id, vectors={"embedding": vector})
-            for item_id, vector in zip(item_ids, embeddings)
-        ]
+            embeddings = await self._embed(texts)
+            if not embeddings:
+                continue
 
-        try:
-            async with self._zvec_write_lock:
-                self.collection.upsert(docs_to_zvec)
-                self.collection.flush()
-            logger.info(f"✅ Rebuilt zvec_index with {len(docs_to_zvec)} memory items from SQLite")
-        except Exception as e:
-            logger.error(f"Zvec rebuild insert failed: {e}")
+            docs = [zvec.Doc(id=i, vectors={"embedding": v}) for i, v in zip(item_ids, embeddings)]
+            await self._async_upsert_and_flush(self.collection, docs)
+            await self.db.mark_items_indexed(item_ids)
+            total_upserted += len(docs)
 
-        await self.db.mark_items_indexed(item_ids)
+        logger.info(f"✅ Rebuilt zvec_index with {total_upserted} memory items")
         self._needs_rebuild = False
 
-    async def initialize_skills(self):
-        """Called on startup to embed skills/*.md so Zvec can retrieve them."""
-        if not SKILLS_DIR.exists() or not self.skill_collection:
-            return
 
-        import re
+    async def initialize_skills(self):
+        """Called on startup. Parses, RAM-caches, and embeds skills."""
+        if not self.skill_collection:
+             return
+        
+        logger.info(f"🔄 Refreshing skills index and RAM cache...")
+        
         skills_to_embed = []
         doc_ids = []
+        self._skill_cache.clear()
 
-        for skill_dir in SKILLS_DIR.iterdir():
-            if not skill_dir.is_dir():
+        for skill_dir in sorted(SKILLS_DIR.iterdir()):
+            if not skill_dir.is_dir() or skill_dir.name == "identity":
                 continue
                 
             skill_id = skill_dir.name
-            if skill_id == "identity":
-                continue
-
-            skill_file = skill_dir / "SKILL.md"
-            if not skill_file.exists():
-                skill_file = skill_dir / "skill.md"
+            skill_file = skill_dir / "SKILL.md" if (skill_dir / "SKILL.md").exists() else skill_dir / "skill.md"
             
             if not skill_file.exists():
                 continue
 
             content = skill_file.read_text()
             name = skill_id
-            description = "Detailed documentation for the skill."
+            description = ""
 
-            # 1. Parse Frontmatter
+            # Extract Frontmatter via regex
             if content.startswith("---"):
                 parts = content.split("---", 2)
                 if len(parts) >= 3:
                     frontmatter = parts[1]
-                    name_match = re.search(r"^name:\s*(.+)$", frontmatter, re.MULTILINE)
-                    if name_match:
-                        name = name_match.group(1).strip()
-                    desc_match = re.search(r"^description:\s*(.+)$", frontmatter, re.MULTILINE)
-                    if desc_match:
-                        description = desc_match.group(1).strip()
+                    name_match = NAME_PATTERN.search(frontmatter)
+                    if name_match: name = name_match.group(1).strip()
+                    desc_match = DESC_PATTERN.search(frontmatter)
+                    if desc_match: description = desc_match.group(1).strip()
 
-            # 2. Extract Trigger Examples
-            trigger_match = re.search(r'### TRIGGER_EXAMPLES(.*?)### END_TRIGGER_EXAMPLES', content, re.DOTALL)
-            
+            # Extract Trigger Examples
+            trigger_match = TRIGGER_PATTERN.search(content)
             if trigger_match:
                 raw_examples = trigger_match.group(1).strip().split('\n')
                 for i, ex in enumerate(raw_examples):
-                    clean_ex = ex.replace('-', '').replace('"', '').strip()
+                    clean_ex = ex.replace('-', '').replace('"', '').replace('*', '').strip()
                     if clean_ex:
-                        # Append the independent trigger vector
                         skills_to_embed.append(clean_ex)
-                        # We use a composite ID so we can extract the parent skill_id later
-                        # Format: example_index|skill_id
-                        doc_ids.append(f"ex_{i}|{skill_id}")
+                        doc_ids.append(f"ex_{i}--{skill_id}")
             
-            # 3. Embed the base summary as a fallback
-            summary = f"Skill: {name}\nDescription: {description}"
+            # Embed the base summary as a fallback
+            summary = f"Skill: {name}. {description}".strip()
             skills_to_embed.append(summary)
-            # Format: sum|skill_id
-            doc_ids.append(f"sum|{skill_id}")
+            doc_ids.append(f"sum--{skill_id}")
+
+            # RAM-Cache the clean content for zero-IO retrievals
+            clean_content = TRIGGER_PATTERN.sub('', content).strip()
+            self._skill_cache[skill_id] = clean_content
 
         if not skills_to_embed:
             return
 
         embeddings = await self._embed(skills_to_embed)
+        docs_to_zvec = [zvec.Doc(id=d, vectors={"embedding": v}) for d, v in zip(doc_ids, embeddings)]
 
-        docs_to_zvec = []
-        for d_id, vector in zip(doc_ids, embeddings):
-            docs_to_zvec.append(zvec.Doc(id=d_id, vectors={"embedding": vector}))
+        await self._async_upsert_and_flush(self.skill_collection, docs_to_zvec)
+        logger.info(f"✅ Re-Embedded {len(docs_to_zvec)} skill vectors. Cache populated.")
 
-        try:
-            async with self._zvec_write_lock:
-                self.skill_collection.upsert(docs_to_zvec)
-                self.skill_collection.flush()
-            logger.info(f"✅ Embedded {len(docs_to_zvec)} skill vectors (including trigger examples)")
-        except Exception as e:
-            logger.error(f"Zvec skills insert failed: {e}")
 
     async def close(self):
         """Gracefully flush and close Zvec collections on shutdown."""
         if self.collection:
             try:
-                self.collection.flush()
+                await asyncio.to_thread(self.collection.flush)
             except Exception as e:
                 logger.error(f"Error flushing memory index: {e}")
             finally:
@@ -478,7 +492,7 @@ class ZvecMemoryStore:
 
         if self.skill_collection:
             try:
-                self.skill_collection.flush()
+                await asyncio.to_thread(self.skill_collection.flush)
             except Exception as e:
                 logger.error(f"Error flushing skill index: {e}")
             finally:

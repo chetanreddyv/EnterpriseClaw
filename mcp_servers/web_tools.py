@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 from ddgs import DDGS
 import trafilatura
 from markdownify import markdownify as md
+from langchain_core.tools import tool
 
 logger = logging.getLogger("mcp.web_tools")
 
@@ -39,6 +40,7 @@ def _smart_truncate(text: str, max_chars: int = 15000) -> str:
 # Tool Implementations
 # ══════════════════════════════════════════════════════════════
 
+@tool
 def web_search(query: str, max_results: int = 5) -> str:
     """
     Search the web for current information.
@@ -84,6 +86,7 @@ def web_search(query: str, max_results: int = 5) -> str:
     return out_str
 
 
+@tool
 def web_fetch(url: str) -> str:
     """
     Fetch a URL and return its content as clean, readable Markdown.

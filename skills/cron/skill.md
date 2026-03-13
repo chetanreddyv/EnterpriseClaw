@@ -4,6 +4,15 @@ description: Schedule reminders and recurring tasks.
 tools: cron_add, cron_list, cron_remove
 ---
 
+### TRIGGER_EXAMPLES
+- "remind me in 10 minutes to grab coffee"
+- "schedule a recurring task every morning at 8am"
+- "list all my scheduled reminders"
+- "cancel my 5pm meeting reminder"
+- "remind me on March 15th at 2pm to follow up"
+- "at 9pm every Sunday, check my emails"
+### END_TRIGGER_EXAMPLES
+
 # Cron
 
 Use the `cron` tools to schedule reminders or recurring tasks. By integrating these tools, you can ensure that the user is reminded on time or that automated tasks execute when requested. 

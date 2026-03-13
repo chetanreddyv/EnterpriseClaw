@@ -20,15 +20,23 @@ def init_agent_llm(model_string: str = None) -> BaseChatModel:
     from langchain.chat_models import init_chat_model
     
     if not model_string:
-        # User requested switch to Qwen as the default local testing model
-        model_string = "lmstudio/qwen/qwen3.5-9b"
+        # Default back to google_genai if nothing is set (cost-effective)
+        model_string = "lmstudio/qwen/qwen3.5"
 
-    # The maxsplit=1 ensures that lmstudio/qwen/qwen3.5-9b 
-    # splits into "lmstudio" and "qwen/qwen3.5-9b"
-    provider, actual_model = (
-        model_string.split("/", 1) if "/" in model_string
-        else ("google_genai", model_string)
-    )
+    # Robust splitting: provider/model
+    if "/" in model_string:
+        provider, actual_model = model_string.split("/", 1)
+    else:
+        # Intelligently guess provider if missing
+        actual_model = model_string
+        if model_string.startswith("gpt"):
+            provider = "openai"
+        elif model_string.startswith("claude"):
+            provider = "anthropic"
+        elif model_string.startswith("gemini"):
+            provider = "google_genai"
+        else:
+            provider = "google_genai" # Default fallback
 
     # Initialize configuration kwargs that will be passed to LangChain
     init_kwargs = {}
@@ -39,12 +47,17 @@ def init_agent_llm(model_string: str = None) -> BaseChatModel:
         provider = "openai" 
         init_kwargs["api_key"] = settings.lm_studio_api_key
         init_kwargs["base_url"] = settings.lm_studio_base_url
+        init_kwargs["timeout"] = 180.0
         
     elif provider == "openai":
         init_kwargs["api_key"] = settings.openai_api_key
         
     elif provider == "google_genai":
         init_kwargs["api_key"] = settings.google_api_key
+
+    logger.info(f"LLM: Resolving '{model_string}' -> [provider={provider}, model={actual_model}]")
+    if "base_url" in init_kwargs:
+        logger.info(f"LLM: Custom Base URL: {init_kwargs['base_url']}")
 
     try:
         llm = init_chat_model(actual_model, model_provider=provider, **init_kwargs)
@@ -70,20 +83,25 @@ def extract_response(state_values: dict, fallback: str = "Done!") -> str:
     if not messages:
         return fallback
 
-    last_msg = messages[-1]
-    if not hasattr(last_msg, "content"):
-        return fallback
+    # Check if we hit a hard failure in the graph
+    if state_values.get("tool_failure_count", 0) >= 3 and not state_values.get("_retry", True):
+         return "❌ I encountered an internal error while trying to process that request. Please try asking again."
 
-    content = last_msg.content
-    if isinstance(content, str) and content:
-        return content
-    elif isinstance(content, list):
-        texts = [
-            item.get("text", "")
-            for item in content
-            if isinstance(item, dict) and "text" in item
-        ]
-        if texts:
-            return "\n".join(texts)
+    # Scan backwards to find the last true AI response
+    from langchain_core.messages import AIMessage
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            content = msg.content
+            if isinstance(content, str) and content:
+                # Some local models pad the answer with newlines or "bot: "
+                return content.strip()
+            elif isinstance(content, list):
+                texts = [
+                    item.get("text", "")
+                    for item in content
+                    if isinstance(item, dict) and "text" in item
+                ]
+                if texts:
+                    return "\n".join(texts).strip()
 
     return fallback
