@@ -67,102 +67,41 @@ This repository contains everything needed to run the assistant locally through 
 
 ```mermaid
 flowchart LR
-  %% ===== Channels =====
-  subgraph CH[Client Channels]
-    U((User))
-    TG[Telegram]
-    WEB[Web Chat / API]
-    CLI[CLI]
-  end
+    %% ===== Clean Minimalist Styling =====
+    classDef client fill:#FFFFFF,stroke:#333333,stroke-width:2px,color:#000000,rx:10,ry:10
+    classDef gateway fill:#E9F4FF,stroke:#2D6EA8,stroke-width:2px,color:#11324D,rx:10,ry:10
+    classDef supervisor fill:#EAF9EF,stroke:#2D8A57,stroke-width:2px,color:#0F3F25,rx:10,ry:10
+    classDef worker fill:#F3E5F5,stroke:#4A148C,stroke-width:2px,color:#311B92,rx:10,ry:10
+    classDef tools fill:#FFF0E3,stroke:#C25A00,stroke-width:2px,color:#4A2200,rx:10,ry:10
+    classDef memory fill:#FCEEF2,stroke:#B23A5A,stroke-width:2px,color:#4A1120,rx:10,ry:10
 
-  %% ===== Gateway =====
-  subgraph GW[Gateway and Delivery Layer]
-    APP[FastAPI Gateway app.py]
-    CM[ChannelManager]
-    HB[System Heartbeat]
-  end
+    %% ===== Nodes =====
+    C(["📱 Clients 
+    (Telegram, Web, CLI)"]):::client
+    G(["🌐 API Gateway
+    (FastAPI & Channels)"]):::gateway
+    S(["🧠 Supervisor
+    (Persistent Orchestrator)"]):::supervisor
+    W(["⚡ Worker
+    (Ephemeral Executor)"]):::worker
+    T(["🛠️ Tool Runtime
+    (& HITL Gate)"]):::tools 
+    M(["📚 Memory & Skills
+    (Vector + SQLite)"]):::memory
 
-  %% ===== Control Plane =====
-  subgraph CP[LangGraph Control Plane]
-    SUP[Supervisor Graph]
-    WRK[Worker Graph]
-    HITL{HITL Approval Gate}
-  end
+    %% ===== Main User Flow (Thick Lines) =====
+    C <==> G
+    G <==>|"Chat Flow"| S
+    S ==>|"delegate_task(domain)"| W
+    W ==>|"result_summary"| S
 
-  %% ===== Tooling =====
-  subgraph TR[Tool Runtime mcp_servers]
-    REG[Global Tool Registry]
-    TCORE[Core Tools]
-    TWEB[Web Tools]
-    TBROWSER[Browser Tools]
-    TEXEC[Exec Tools]
-    TGW[Google Workspace Tools]
-  end
-
-  %% ===== Memory =====
-  subgraph MP[Memory and Persistence]
-    MEM[Memory Retrieval Service]
-    CK[(checkpoints_v2.db)]
-    DB[(agent_session.db)]
-    ZV[(zvec_index + zvec_skills)]
-    SK[[skills/*.md]]
-  end
-
-  %% User/channel ingress
-  U --> TG
-  U --> WEB
-  U --> CLI
-  TG --> APP
-  WEB --> APP
-  CLI --> APP
-  HB --> APP
-
-  %% Main orchestration
-  APP --> SUP
-  SUP -->|direct response| CM
-  SUP -->|delegate_task| WRK
-  WRK --> HITL
-  HITL -->|approved| REG
-  HITL -->|needs user decision| CM
-  REG --> TCORE
-  REG --> TWEB
-  REG --> TBROWSER
-  REG --> TEXEC
-  REG --> TGW
-  TCORE --> WRK
-  TWEB --> WRK
-  TBROWSER --> WRK
-  TEXEC --> WRK
-  TGW --> WRK
-  WRK -->|result summary| SUP
-
-  %% Outbound delivery
-  CM --> TG
-  CM --> WEB
-  CM --> CLI
-
-  %% Memory and persistence links
-  SUP <--> MEM
-  WRK <--> MEM
-  MEM <--> DB
-  MEM <--> ZV
-  SK --> MEM
-  APP <--> CK
-
-  %% Visual style
-  classDef channel fill:#FFF5D9,stroke:#C48A00,color:#4A3500,stroke-width:1.5px;
-  classDef gateway fill:#E9F4FF,stroke:#2D6EA8,color:#11324D,stroke-width:1.5px;
-  classDef control fill:#EAF9EF,stroke:#2D8A57,color:#0F3F25,stroke-width:1.5px;
-  classDef tool fill:#FFF0E3,stroke:#C25A00,color:#4A2200,stroke-width:1.5px;
-  classDef memory fill:#FCEEF2,stroke:#B23A5A,color:#4A1120,stroke-width:1.5px;
-  classDef decision fill:#FFF8CC,stroke:#B59F00,color:#4A4200,stroke-width:1.5px;
-
-  class U,TG,WEB,CLI channel;
-  class APP,CM,HB gateway;
-  class SUP,WRK control;
-  class REG,TCORE,TWEB,TBROWSER,TEXEC,TGW tool;
-  class MEM,CK,DB,ZV,SK memory;
-  class HITL decision;
+    %% ===== Execution Loop =====
+    W <==>|"Action / Observation"| T
+    
+    %% ===== Secondary/Background Flows (Dotted Lines) =====
+    T -.->|"HITL Approval Request"| G
+    S -.->|"Fetch Context"| M
+    W -.->|"Fetch Domain Rules"| M
 ```
 
 ### Simple flow (text)
