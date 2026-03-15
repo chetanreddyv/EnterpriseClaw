@@ -1,0 +1,21 @@
+.git/
+.gitignore
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+.env
+.env.*
+
+# Runtime/generated data
+data/
+cron/runs/
+test_out.log
+
+# Local artifacts
+tmp/
+*.log
+*.sqlite
+*.db-shm
+*.db-wal

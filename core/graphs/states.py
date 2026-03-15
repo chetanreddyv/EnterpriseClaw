@@ -6,7 +6,7 @@ The Worker's messages are a lightweight action ledger; heavy environment
 state lives only in `observation`, which is REPLACED (not appended) each turn.
 """
 
-from typing import Annotated, Optional, TypedDict
+from typing import Annotated, TypedDict
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
@@ -24,22 +24,20 @@ class SupervisorState(TypedDict):
     active_model: str
     
     # User input / query tracking
-    user_input: str
-    original_query: str
+    user_input: str      # Raw tool/human message content (string or list of dicts)
+    original_query: str  # Normalized text extracted from user_input for retrieval
     
     # Context injected by the supervisor intent node
-    memory_context: str
-    skill_prompts: str
-    active_skills: list[str]
+    memory_context: str  # Relevant facts retrieved from long-term memory (DB)
     
     # Internal communication between PromptBuilder and Executor
-    _formatted_prompt: list[BaseMessage]
+    _formatted_prompt: list[BaseMessage] # Pruned and finalized message list for LLM call
     
     # Execution safety 
     tool_failure_count: int
     _retry: bool
     
-    # HITL tiering: set of tool names that are /permit'd for auto-approval
+    # HITL policy directives, e.g. tool names for /permit and deny markers (deny:<tool>)
     approved_tools: list[str]
 
 
@@ -63,9 +61,14 @@ class WorkerState(TypedDict):
     # REPLACED each turn. Current A11y tree / terminal output / diff.
     observation: str
     
-    # "browser" | "exec" | "all" — determines which tools to bind
-    # and whether to execute sequentially or concurrently
-    tool_domain: str
+    # Dynamic tool categories requested by Supervisor delegation.
+    # Example: ["browser"], ["web", "google_workspace"], ["all"]
+    required_tool_categories: list[str]
+
+    # JIT skill context fetched once from the Worker objective
+    skill_prompts: str
+    active_skills: list[str]
+    active_skill_tools: list[str]  # Tool names declared by matched skills
     
     # Loop control
     step_count: int
@@ -83,7 +86,7 @@ class WorkerState(TypedDict):
     _retry: bool
     
     # Internal communication between PromptBuilder and Executor
-    _formatted_prompt: list[BaseMessage]
+    _formatted_prompt: list[BaseMessage] # Minimal action-observation prompt (objective + observation)
     
-    # HITL tiering: inherited from Supervisor's approved_tools
+    # HITL policy directives inherited from Supervisor
     approved_tools: list[str]

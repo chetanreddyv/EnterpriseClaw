@@ -58,6 +58,13 @@ class MemoryRetrieval:
         """Fetch dynamic skill prompts to inject into system prompt."""
         return await self.store.get_relevant_skills(user_input, top_k=2)
 
+    async def get_relevant_skills_with_metadata(
+        self,
+        user_input: str,
+    ) -> tuple[str, list[str], dict[str, list[str]]]:
+        """Fetch matched skill prompts plus frontmatter tool declarations."""
+        return await self.store.get_relevant_skills_with_metadata(user_input, top_k=2)
+
     async def get_all_memories(self):
         """Return all active memory items for debugging/admin."""
         return await self.db.get_all_active_items()

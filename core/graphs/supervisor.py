@@ -10,13 +10,14 @@ Pipeline: Intent → PromptBuilder → Executor → [Tools | END]
 """
 
 from langgraph.graph import StateGraph, END
-from langgraph.pregel.types import RetryPolicy
+from langgraph.types import RetryPolicy
 
 from core.graphs.states import SupervisorState
 from core.nodes.supervisor_nodes import (
     supervisor_intent_node,
     supervisor_prompt_builder_node,
     supervisor_executor_node,
+    supervisor_compaction_node,
     supervisor_tools_node,
 )
 from core.nodes.tool_error import tool_error_node
@@ -37,7 +38,7 @@ def route_after_supervisor_executor(state: SupervisorState) -> str:
     if getattr(last_msg, "tool_calls", []):
         return "tools"
 
-    return END
+    return "compact"
 
 
 def build_supervisor_graph(checkpointer=None):
@@ -52,6 +53,7 @@ def build_supervisor_graph(checkpointer=None):
     workflow.add_node("prompt_builder", supervisor_prompt_builder_node, retry=retry_policy)
     workflow.add_node("executor", supervisor_executor_node, retry=retry_policy)
     workflow.add_node("tools", supervisor_tools_node, retry=retry_policy)
+    workflow.add_node("compact", supervisor_compaction_node, retry=retry_policy)
     workflow.add_node("tool_error", tool_error_node)
 
     # Entry Point
@@ -65,11 +67,13 @@ def build_supervisor_graph(checkpointer=None):
     workflow.add_conditional_edges("executor", route_after_supervisor_executor, {
         "tools": "tools",
         "tool_error": "tool_error",
+        "compact": "compact",
         END: END,
     })
 
     # Loop backs
     workflow.add_edge("tools", "prompt_builder")
     workflow.add_edge("tool_error", "prompt_builder")
+    workflow.add_edge("compact", END)
 
     return workflow.compile(checkpointer=checkpointer)

@@ -5,14 +5,15 @@ The Worker operates in a strict Action-Observation loop:
 - `messages` is a lightweight action ledger (tiny strings only).
 - `observation` holds the heavy environment state (A11y tree, terminal output).
 - `observation` is REPLACED each turn, never appended.
-- Sequential execution for stateful domains (browser, exec).
-- Concurrent execution for read-only domains (all).
+- Sequential execution for stateful tools.
+- Concurrent execution for read-only tool sets.
 """
 
 import asyncio
 import logging
 import inspect
 import json
+from datetime import datetime, timezone
 from typing import Dict, Any
 
 from langchain_core.messages import (
@@ -21,87 +22,248 @@ from langchain_core.messages import (
 from langchain_core.runnables import RunnableConfig
 
 from core.graphs.states import WorkerState
-from core.llm import init_agent_llm
-from mcp_servers import GLOBAL_TOOL_REGISTRY
+from core.llm import init_agent_llm, is_llm_connection_error
+from mcp_servers import (
+    GLOBAL_TOOL_REGISTRY,
+    GLOBAL_TOOL_METADATA,
+    GLOBAL_CATEGORY_TOOLS,
+)
 
 logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────
 OBSERVATION_SEPARATOR = "\n===OBSERVATION===\n"
 MAX_OBSERVATION_CHARS = 50_000  # ~12,500 tokens
-
-# Tool sets per domain
-BROWSER_TOOLS = {
-    "browser_navigate", "browser_get_text", "browser_screenshot",
-    "browser_go_back", "browser_scroll", "browser_wait_for",
-    "browser_snapshot", "browser_tab_management",
-    "browser_click", "browser_type", "browser_execute_js",
-    "browser_select_option", "browser_press_key", "browser_hover",
-    "browser_handle_dialog", "browser_file_upload",
-    "batch_actions", "escalate_to_supervisor",
-}
-
-EXEC_TOOLS = {
-    "exec_command", "batch_actions", "escalate_to_supervisor",
-}
-
-# "all" = everything available
-ALL_TOOLS_BASE = {
-    "web_search", "web_fetch", "check_current_time",
-    "escalate_to_supervisor", "batch_actions",
-}
-
-# Stateful domains that require sequential execution
-STATEFUL_DOMAINS = {"browser", "exec"}
+MAX_SKILL_PROMPT_CHARS = 10_000
 
 
-def _get_worker_tools(tool_domain: str) -> list:
-    """Resolve callable tools for a given domain."""
-    if tool_domain == "browser":
-        tool_names = BROWSER_TOOLS
-    elif tool_domain == "exec":
-        tool_names = EXEC_TOOLS
+def _normalize_categories(raw_categories: list[str] | None) -> list[str]:
+    """Normalize Worker categories from state."""
+    categories: list[str] = []
+    for category in raw_categories or []:
+        if isinstance(category, str):
+            value = category.strip().lower()
+            if value and value not in categories:
+                categories.append(value)
+    return categories or ["all"]
+
+
+def _resolve_tool_names(required_categories: list[str] | None) -> set[str]:
+    """Resolve tool names dynamically from loaded plugin category metadata."""
+    categories = _normalize_categories(required_categories)
+
+    if "all" in categories:
+        tool_names = set(GLOBAL_TOOL_REGISTRY.keys())
     else:
-        # "all" = union of everything in the registry
-        tool_names = ALL_TOOLS_BASE | BROWSER_TOOLS | EXEC_TOOLS
+        tool_names: set[str] = set()
+        for category in categories:
+            tool_names.update(GLOBAL_CATEGORY_TOOLS.get(category, set()))
 
+    # Always keep escalation available as a safe bailout path.
+    tool_names.add("escalate_to_supervisor")
+    return tool_names
+
+
+def _normalize_tool_names(raw_tool_names: list[str] | None) -> list[str]:
+    """Normalize declared tool names from matched skill metadata."""
+    normalized: list[str] = []
+    for tool_name in raw_tool_names or []:
+        if isinstance(tool_name, str):
+            value = tool_name.strip()
+            if value and value not in normalized:
+                normalized.append(value)
+    return normalized
+
+
+def _resolve_effective_tool_names(
+    required_categories: list[str] | None,
+    active_skill_tools: list[str] | None,
+    *,
+    emit_warnings: bool,
+) -> set[str]:
+    """Resolve final tool set: domain/category scope intersected with skill tool metadata."""
+    category_tool_names = _resolve_tool_names(required_categories)
+    normalized_skill_tools = _normalize_tool_names(active_skill_tools)
+    if not normalized_skill_tools:
+        return category_tool_names
+
+    registry_names = set(GLOBAL_TOOL_REGISTRY.keys())
+    unknown_tools = sorted(name for name in normalized_skill_tools if name not in registry_names)
+    valid_declared_tools = {name for name in normalized_skill_tools if name in registry_names}
+    out_of_scope_tools = sorted(name for name in valid_declared_tools if name not in category_tool_names)
+
+    if unknown_tools and emit_warnings:
+        logger.warning(
+            "WorkerToolBinding: Ignoring unknown skill-declared tools: %s",
+            ", ".join(unknown_tools),
+        )
+
+    if out_of_scope_tools and emit_warnings:
+        logger.warning(
+            "WorkerToolBinding: Ignoring out-of-scope skill tools for categories %s: %s",
+            _normalize_categories(required_categories),
+            ", ".join(out_of_scope_tools),
+        )
+
+    resolved_tools = {name for name in valid_declared_tools if name in category_tool_names}
+    resolved_tools.add("escalate_to_supervisor")
+
+    if resolved_tools == {"escalate_to_supervisor"}:
+        if emit_warnings:
+            logger.warning(
+                "WorkerToolBinding: Skill tool filter left no usable tools. Falling back to category scope."
+            )
+        return category_tool_names
+
+    return resolved_tools
+
+
+def _resolve_worker_tools(
+    required_categories: list[str] | None,
+    active_skill_tools: list[str] | None,
+) -> tuple[list, set[str]]:
+    """Resolve callable tools and their names from dynamic category selection."""
+    tool_names = _resolve_effective_tool_names(
+        required_categories,
+        active_skill_tools,
+        emit_warnings=True,
+    )
     tools = []
-    for name in tool_names:
+    for name in sorted(tool_names):
         func = GLOBAL_TOOL_REGISTRY.get(name)
         if func:
             tools.append(func)
-    return tools
+    return tools, tool_names
+
+
+def _is_stateful_tool(tool_name: str) -> bool:
+    """Stateful tools must be executed sequentially to preserve environment integrity."""
+    metadata = GLOBAL_TOOL_METADATA.get(tool_name, {})
+    if bool(metadata.get("stateful")):
+        return True
+
+    category = str(metadata.get("category", "")).strip().lower()
+    return category in {"browser", "exec"}
+
+
+def _observation_mode_for_tool(tool_name: str) -> str:
+    """Return observation truncation mode for a tool: 'head' or 'tail'."""
+    metadata = GLOBAL_TOOL_METADATA.get(tool_name, {})
+    mode = str(metadata.get("observation_mode", "head")).strip().lower()
+    if mode in {"head", "tail"}:
+        return mode
+    return "tail" if tool_name.startswith("exec_") else "head"
 
 
 # ═══════════════════════════════════════════════════════════════
-# 1. WORKER PROMPT BUILDER
+# 1. WORKER SKILL CONTEXT NODE (JIT)
+# ═══════════════════════════════════════════════════════════════
+
+async def worker_skill_context_node(state: WorkerState) -> Dict[str, Any]:
+    """Retrieve objective-matched skill prompts once at Worker start."""
+    objective = state.get("objective", "").strip()
+    fallback = "You are a specialized task executor. Proceed safely and verify actions before execution."
+
+    if not objective:
+        return {"skill_prompts": fallback, "active_skills": [], "active_skill_tools": []}
+
+    try:
+        from memory.retrieval import memory_retrieval
+
+        skill_prompts, matched_skills, skill_tool_map = await memory_retrieval.get_relevant_skills_with_metadata(objective)
+        if not skill_prompts:
+            skill_prompts = fallback
+
+        active_skill_tools: list[str] = []
+        for skill_name in matched_skills or []:
+            for tool_name in skill_tool_map.get(skill_name, []):
+                if isinstance(tool_name, str):
+                    value = tool_name.strip()
+                    if value and value not in active_skill_tools:
+                        active_skill_tools.append(value)
+
+        if len(skill_prompts) > MAX_SKILL_PROMPT_CHARS:
+            skill_prompts = (
+                skill_prompts[:MAX_SKILL_PROMPT_CHARS]
+                + "\n...[Skill context truncated to protect prompt budget]..."
+            )
+
+        logger.info("WorkerSkillContext: matched_skills=%s", matched_skills)
+        if active_skill_tools:
+            logger.info("WorkerSkillContext: matched_skill_tools=%s", active_skill_tools)
+        return {
+            "skill_prompts": skill_prompts,
+            "active_skills": matched_skills or [],
+            "active_skill_tools": active_skill_tools,
+        }
+    except Exception as e:
+        logger.warning("WorkerSkillContext: retrieval failed: %s", e)
+        return {
+            "skill_prompts": fallback,
+            "active_skills": [],
+            "active_skill_tools": [],
+        }
+
+
+# ═══════════════════════════════════════════════════════════════
+# 2. WORKER PROMPT BUILDER
 # ═══════════════════════════════════════════════════════════════
 
 async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
     """
-    Build a minimal system prompt: objective + current observation.
-    No identity, no memory, no skills. Pure Action-Observation.
+    Build the Worker prompt from objective + observation + JIT skill context.
     """
     objective = state.get("objective", "Complete the assigned task.")
     observation = state.get("observation", "No environment state available yet.")
     step_count = state.get("step_count", 0)
     max_steps = state.get("max_steps", 15)
+    required_categories = _normalize_categories(state.get("required_tool_categories"))
+    active_skill_tools = state.get("active_skill_tools") or []
+    skill_prompts = state.get("skill_prompts", "")
+
+    available_tool_names = sorted(
+        _resolve_effective_tool_names(
+            required_categories,
+            active_skill_tools,
+            emit_warnings=False,
+        )
+    )
+    tool_preview = ", ".join(available_tool_names[:24])
+    if len(available_tool_names) > 24:
+        tool_preview += ", ..."
+
+    now_utc = datetime.now(timezone.utc)
+    now_local = datetime.now().astimezone()
+
+    batch_actions_hint = ""
+    if "batch_actions" in available_tool_names:
+        batch_actions_hint = "- If you need to fill multiple form fields, use the `batch_actions` tool.\n"
 
     system_prompt = (
-        f"## Task Executor\n"
-        f"**Your objective:** {objective}\n\n"
-        f"**Step {step_count + 1} of {max_steps}**\n\n"
+        "## System Clock\n"
+        f"- Current UTC Time: {now_utc.isoformat()}\n"
+        f"- Local System Time: {now_local.isoformat()}\n"
+        f"- Local Timezone: {now_local.tzname()}\n\n"
+        "## Core Identity\n"
+        "You are a specialized Worker for EnterpriseClaw. Execute the delegated objective safely and precisely.\n\n"
+        f"## Operational Rules & Best Practices\n{skill_prompts}\n\n"
+        "## Allowed Tool Scope\n"
+        f"- Required categories: {', '.join(required_categories)}\n"
+        f"- Bound tools ({len(available_tool_names)}): {tool_preview}\n\n"
+        f"## Your Objective\n{objective}\n\n"
+        f"## Progress\n- Step {step_count + 1} of {max_steps}\n\n"
         f"## Current Environment State\n"
         f"```\n{observation}\n```\n\n"
-        f"## Instructions\n"
+        f"## Rules\n"
         f"- Take the NEXT action to accomplish your objective.\n"
-        f"- If you need to fill multiple form fields, use the `batch_actions` tool.\n"
+        f"{batch_actions_hint}"
         f"- If you are stuck, confused, or the environment is not responding, "
         f"use `escalate_to_supervisor` immediately instead of looping.\n"
         f"- When the task is complete, respond with a summary of what you accomplished.\n"
     )
 
     sys_msg = SystemMessage(content=system_prompt, id="worker_system_msg")
+    objective_msg = HumanMessage(content=f"Objective: {objective}", id="worker_objective_msg")
 
     # Worker keeps a lightweight message tail — no complex pruning needed
     messages = state.get("messages", [])
@@ -120,13 +282,13 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
     logger.info("🌀"*80)
 
     return {
-        "_formatted_prompt": [sys_msg] + history,
+        "_formatted_prompt": [sys_msg, objective_msg] + history,
         "step_count": step_count + 1,
     }
 
 
 # ═══════════════════════════════════════════════════════════════
-# 2. WORKER EXECUTOR
+# 3. WORKER EXECUTOR
 # ═══════════════════════════════════════════════════════════════
 
 async def worker_executor_node(state: WorkerState, config: RunnableConfig) -> Dict[str, Any]:
@@ -139,10 +301,17 @@ async def worker_executor_node(state: WorkerState, config: RunnableConfig) -> Di
         logger.warning("WorkerExecutor: No `_formatted_prompt`. Exiting.")
         return {"status": "failed", "result_summary": "Internal error: no prompt."}
 
-    tool_domain = state.get("tool_domain", "all")
-    all_tools = _get_worker_tools(tool_domain)
+    required_categories = _normalize_categories(state.get("required_tool_categories"))
+    active_skill_tools = state.get("active_skill_tools") or []
+    all_tools, resolved_tool_names = _resolve_worker_tools(required_categories, active_skill_tools)
 
-    logger.info(f"WorkerExecutor: Domain '{tool_domain}', binding {len(all_tools)} tools.")
+    logger.info(
+        "WorkerExecutor: Categories %s, binding %d tools (skill tools=%d).",
+        required_categories,
+        len(all_tools),
+        len(_normalize_tool_names(active_skill_tools)),
+    )
+    logger.debug("WorkerExecutor: Bound tools => %s", sorted(resolved_tool_names))
 
     llm = init_agent_llm(state.get("active_model", ""))
     llm_with_tools = llm.bind_tools(all_tools) if all_tools else llm
@@ -179,11 +348,32 @@ async def worker_executor_node(state: WorkerState, config: RunnableConfig) -> Di
 
     except Exception as e:
         logger.error(f"WorkerExecutor: LLM API Call Failed: {e}", exc_info=True)
+        if is_llm_connection_error(e):
+            active_model = state.get("active_model") or "default"
+            failure_summary = (
+                f"Worker failed because the model backend for `{active_model}` was unreachable "
+                "(connection error)."
+            )
+            return {
+                "messages": [
+                    AIMessage(
+                        content=(
+                            "I cannot continue this delegated task right now because the model backend is unreachable. "
+                            "Escalating control to the supervisor."
+                        )
+                    )
+                ],
+                "status": "failed",
+                "result_summary": failure_summary,
+                "_retry": False,
+                "tool_failure_count": 0,
+            }
+
         return {"_retry": True}
 
 
 # ═══════════════════════════════════════════════════════════════
-# 3. WORKER TOOLS NODE
+# 4. WORKER TOOLS NODE
 # ═══════════════════════════════════════════════════════════════
 
 async def _execute_single_tool(action_name: str, tool_args: dict, config: RunnableConfig):
@@ -216,11 +406,11 @@ async def _execute_single_tool(action_name: str, tool_args: dict, config: Runnab
         return f"Error executing {action_name}: {e}"
 
 
-def _split_observation(raw_output: str, tool_domain: str) -> tuple[str, str | None]:
+def _split_observation(raw_output: str, tool_name: str) -> tuple[str, str | None]:
     """
     Split tool output on OBSERVATION_SEPARATOR.
     Returns (lightweight_summary, heavy_observation_or_None).
-    Applies truncation to the observation based on domain.
+    Applies truncation strategy based on the producing tool.
     """
     if OBSERVATION_SEPARATOR in raw_output:
         parts = raw_output.split(OBSERVATION_SEPARATOR, 1)
@@ -229,7 +419,7 @@ def _split_observation(raw_output: str, tool_domain: str) -> tuple[str, str | No
 
         # Truncate oversized observations
         if len(observation) > MAX_OBSERVATION_CHARS:
-            if tool_domain == "exec":
+            if _observation_mode_for_tool(tool_name) == "tail":
                 # Terminal: keep the TAIL (most recent output is most relevant)
                 observation = "...[TRUNCATED]...\n" + observation[-MAX_OBSERVATION_CHARS:]
             else:
@@ -244,9 +434,9 @@ def _split_observation(raw_output: str, tool_domain: str) -> tuple[str, str | No
 
 async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[str, Any]:
     """
-    Execute tool calls with domain-aware strategy:
-    - Stateful domains (browser, exec): Sequential, halt on first failure.
-    - Read-only domains (all): Concurrent via asyncio.gather.
+    Execute tool calls with metadata-aware strategy:
+    - Stateful tools: Sequential, halt on first failure.
+    - Read-only tools: Concurrent via asyncio.gather.
 
     CRITICAL: Tool results are SPLIT:
     - Lightweight summary → ToolMessage (stays in messages)
@@ -265,13 +455,13 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
     if not getattr(last_message, "tool_calls", []):
         return {}
 
-    tool_domain = state.get("tool_domain", "all")
     approved_tools = set(state.get("approved_tools") or [])
     tool_messages = []
     latest_observation = None  # Will hold the LAST observation (replaces, not appends)
+    tool_calls = list(last_message.tool_calls)
 
     # ── Check for escalation sentinel ──
-    for tool_call in last_message.tool_calls:
+    for tool_call in tool_calls:
         if tool_call["name"] == "escalate_to_supervisor":
             reason = tool_call["args"].get("reason", "Worker escalated without providing a reason.")
             tool_messages.append(ToolMessage(
@@ -285,9 +475,11 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
             }
 
     # ── Domain-aware execution ──
-    if tool_domain in STATEFUL_DOMAINS:
+    run_sequential = any(_is_stateful_tool(tc["name"]) for tc in tool_calls)
+
+    if run_sequential:
         # SEQUENTIAL: Execute in exact LLM-specified order. Halt on first failure.
-        for tool_call in last_message.tool_calls:
+        for tool_call in tool_calls:
             action_name = tool_call["name"]
             call_id = tool_call["id"]
 
@@ -300,8 +492,8 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
                         tool_call_id=call_id,
                     ))
                     # Halt remaining tools after rejection
-                    idx = last_message.tool_calls.index(tool_call)
-                    for remaining in last_message.tool_calls[idx + 1:]:
+                    idx = tool_calls.index(tool_call)
+                    for remaining in tool_calls[idx + 1:]:
                         tool_messages.append(ToolMessage(
                             content=f"Skipped: previous action '{action_name}' was rejected.",
                             tool_call_id=remaining["id"],
@@ -316,8 +508,8 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
             if isinstance(result_content, str) and result_content.startswith("Error"):
                 tool_messages.append(ToolMessage(content=result_content, tool_call_id=call_id))
                 # Halt: skip remaining tools
-                idx = last_message.tool_calls.index(tool_call)
-                for remaining in last_message.tool_calls[idx + 1:]:
+                idx = tool_calls.index(tool_call)
+                for remaining in tool_calls[idx + 1:]:
                     tool_messages.append(ToolMessage(
                         content=f"Skipped: previous action '{action_name}' failed.",
                         tool_call_id=remaining["id"],
@@ -326,7 +518,7 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
 
             # Split observation from summary
             if isinstance(result_content, str):
-                summary, obs = _split_observation(result_content, tool_domain)
+                summary, obs = _split_observation(result_content, action_name)
                 tool_messages.append(ToolMessage(content=summary, tool_call_id=call_id))
                 if obs is not None:
                     latest_observation = obs  # REPLACE, not append
@@ -335,7 +527,7 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
     else:
         # CONCURRENT: Read-only tools can run in parallel
         # First, check HITL for any tool that requires approval (rare in read-only domain)
-        for tool_call in last_message.tool_calls:
+        for tool_call in tool_calls:
             if requires_approval(tool_call["name"], approved_tools):
                 decision = request_tool_approval(tool_call["name"], tool_call["args"])
                 if decision != "approve":
@@ -347,18 +539,18 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
 
         tasks = [
             _execute_single_tool(tc["name"], tc["args"], config)
-            for tc in last_message.tool_calls
+            for tc in tool_calls
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for tool_call, result_content in zip(last_message.tool_calls, results):
+        for tool_call, result_content in zip(tool_calls, results):
             call_id = tool_call["id"]
 
             if isinstance(result_content, Exception):
                 result_content = f"Error executing {tool_call['name']}: {str(result_content)}"
 
             if isinstance(result_content, str):
-                summary, obs = _split_observation(result_content, tool_domain)
+                summary, obs = _split_observation(result_content, tool_call["name"])
                 tool_messages.append(ToolMessage(content=summary, tool_call_id=call_id))
                 if obs is not None:
                     latest_observation = obs
@@ -376,7 +568,7 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
 
 
 # ═══════════════════════════════════════════════════════════════
-# 4. WORKER SUMMARIZE NODE
+# 5. WORKER SUMMARIZE NODE
 # ═══════════════════════════════════════════════════════════════
 
 async def worker_summarize_node(state: WorkerState) -> Dict[str, Any]:
@@ -384,6 +576,14 @@ async def worker_summarize_node(state: WorkerState) -> Dict[str, Any]:
     Called when the Worker reaches END.
     Extracts the last AI message as the result_summary.
     """
+    existing_status = state.get("status")
+    existing_summary = (state.get("result_summary") or "").strip()
+    if existing_status in {"failed", "escalated"} and existing_summary:
+        return {
+            "status": existing_status,
+            "result_summary": existing_summary,
+        }
+
     messages = state.get("messages", [])
 
     # Find the last AI response

@@ -4,12 +4,49 @@ model-agnostic init + fallback pattern.
 """
 
 import logging
+from collections import deque
 from langchain_core.language_models import BaseChatModel
 from config.settings import settings
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "lmstudio/qwen/qwen3.5-9b"
+
+
+def is_llm_connection_error(exc: Exception) -> bool:
+    """Return True when an exception chain indicates transport-level model outage."""
+    seen = set()
+    queue = deque([exc])
+
+    while queue:
+        current = queue.popleft()
+        if not current:
+            continue
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+
+        if isinstance(
+            current,
+            (
+                httpx.ConnectError,
+                httpx.ConnectTimeout,
+                httpx.ReadTimeout,
+                httpx.RemoteProtocolError,
+            ),
+        ):
+            return True
+
+        name = type(current).__name__
+        if name in {"APIConnectionError", "APITimeoutError"}:
+            return True
+
+        queue.append(getattr(current, "__cause__", None))
+        queue.append(getattr(current, "__context__", None))
+
+    return False
 
 def init_agent_llm(model_string: str = None) -> BaseChatModel:
     """

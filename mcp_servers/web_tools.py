@@ -1,8 +1,8 @@
 """
 mcp_servers/web_tools.py — Web Search and Fetch tools.
 
-This plugin provides the agent with the ability to search the web and
-fetch specific webpage contents, returning clean, LLM-optimized markdown.
+Provides the agent with web search and fetch capabilities, 
+returning strictly clean, raw data optimized for LLM context limits.
 """
 
 import logging
@@ -13,7 +13,6 @@ import httpx
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 import trafilatura
-from markdownify import markdownify as md
 from langchain_core.tools import tool
 
 logger = logging.getLogger("mcp.web_tools")
@@ -30,11 +29,10 @@ def _smart_truncate(text: str, max_chars: int = 15000) -> str:
     truncated = text[:max_chars]
     last_newline = truncated.rfind('\n')
     
-    # If a newline exists in the last 20% of the truncated text, cut there
     if last_newline > max_chars * 0.8:
         truncated = truncated[:last_newline]
         
-    return truncated + "\n\n... [Content Truncated due to length limit]"
+    return truncated + "\n\n[TRUNCATED]"
 
 # ══════════════════════════════════════════════════════════════
 # Tool Implementations
@@ -52,44 +50,37 @@ def web_search(query: str, max_results: int = 5) -> str:
     max_retries = 3
     results = []
     
-    # Exponential backoff for DDGS rate limits
     for attempt in range(max_retries):
         try:
             with DDGS() as ddgs:
-                # Consume the iterator safely
                 for r in ddgs.text(query, max_results=max_results):
                     results.append(r)
-            break # Break loop if successful
+            break 
         except Exception as e:
             logger.warning(f"DDGS attempt {attempt + 1} failed: {e}")
             if attempt == max_retries - 1:
-                return f"Error executing search: Search engine rate-limited or failed after {max_retries} attempts. Try fetching a known URL instead."
-            time.sleep(2 ** attempt) # Wait 1s, then 2s
+                return "Error: Search engine rate-limited or failed."
+            time.sleep(2 ** attempt)
             
     if not results:
-        return f"No results found for query: '{query}'. Try a broader search."
+        return "No results found."
         
-    # Format beautifully for the LLM
-    lines = [f"## Search Results for '{query}'\n"]
-    for i, res in enumerate(results, start=1):
-        title = res.get("title", "No Title")
-        href = res.get("href", "No URL")
-        body = res.get("body", "No Snippet")
+    # Return strict, clean key-value text blocks
+    lines = []
+    for res in results:
+        title = res.get("title", "").strip()
+        href = res.get("href", "").strip()
+        body = res.get("body", "").strip()
         
-        # Ensure snippet isn't excessively long
-        if len(body) > 400:
-            body = body[:397] + "..."
-            
-        lines.append(f"**{i}. [{title}]({href})**\n> {body}\n")
+        lines.append(f"Title: {title}\nURL: {href}\nSnippet: {body}\n---")
         
-    out_str = "\n".join(lines)
-    return out_str
+    return "\n".join(lines).strip()
 
 
 @tool
 def web_fetch(url: str) -> str:
     """
-    Fetch a URL and return its content as clean, readable Markdown.
+    Fetch a URL and return its raw text content.
     
     Args:
         url: The web page URL to fetch.
@@ -103,59 +94,49 @@ def web_fetch(url: str) -> str:
     
     try:
         with httpx.Client(headers=headers, timeout=15.0, follow_redirects=True) as client:
-            # Stream the response to check headers before downloading giant files
             with client.stream("GET", url) as response:
                 response.raise_for_status()
                 content_type = response.headers.get("Content-Type", "").lower()
                 
-                # Reject non-text/HTML files (like PDFs, zips, media)
                 if not content_type.startswith("text/") and "application/xhtml+xml" not in content_type:
-                    return f"Failed to fetch {url}: Unsupported content type '{content_type}'. This tool only reads HTML/text."
+                    return f"Error: Unsupported content type '{content_type}'."
                 
-                # Read the actual content
                 response.read()
                 html_content = response.content
 
-        # 1. Primary Extraction: Try Trafilatura (Best for articles/blogs)
+        # 1. Primary Extraction: Trafilatura (Clean article extraction)
         text_content = trafilatura.extract(
             html_content,
-            include_links=True,
-            include_formatting=True,
+            include_links=False, # Disabled to keep output clean
+            include_formatting=False, # Disabled to avoid markdown clutter
             favor_precision=True
         )
 
-        # 2. Fallback Extraction: BeautifulSoup + Markdownify (Best for non-articles/lists/docs)
+        # 2. Fallback Extraction: BeautifulSoup Raw Text
         if not text_content:
             soup = BeautifulSoup(html_content, "html.parser")
             
-            # Strip extremely noisy elements
-            for tag in soup(["script", "style", "nav", "footer", "aside", "noscript", "iframe"]):
+            # Strip noisy structural elements
+            for tag in soup(["script", "style", "nav", "footer", "aside", "noscript", "iframe", "header", "menu"]):
                 tag.decompose()
                 
-            # Convert the cleaned HTML to Markdown
-            text_content = md(str(soup), strip=['img', 'a'], heading_style="ATX").strip()
+            # Extract raw text separated by double newlines
+            text_content = soup.get_text(separator='\n\n', strip=True)
 
         if not text_content:
-             return f"Content of {url} could not be parsed or is empty."
+             return "Error: Content could not be parsed or is empty."
 
-        text_content = _smart_truncate(text_content, max_chars=15000)
-        
-        return f"### Content of {url}:\n\n{text_content}"
+        return _smart_truncate(text_content, max_chars=15000).strip()
 
     except httpx.TimeoutException:
-        logger.error(f"❌ web_fetch Timeout: {url}")
-        return f"Failed to fetch {url}: Connection timed out after 15 seconds."
+        logger.error(f"Timeout: {url}")
+        return "Error: Connection timed out."
     except httpx.HTTPStatusError as e:
-        logger.error(f"❌ web_fetch HTTP error: {e.response.status_code}")
-        # Provide helpful guidance to the LLM
-        if e.response.status_code in (401, 403):
-            return f"Failed to fetch {url}: Access Denied (HTTP {e.response.status_code}). The site may be blocking bots."
-        if e.response.status_code == 404:
-            return f"Failed to fetch {url}: Page Not Found (HTTP 404)."
-        return f"Failed to fetch {url}: HTTP {e.response.status_code}"
+        logger.error(f"HTTP error: {e.response.status_code}")
+        return f"Error: HTTP {e.response.status_code}"
     except Exception as e:
-        logger.error(f"❌ web_fetch error: {str(e)}")
-        return f"Failed to fetch {url}: {type(e).__name__} - {str(e)}"
+        logger.error(f"Fetch error: {str(e)}")
+        return f"Error: {type(e).__name__}"
 
 # ══════════════════════════════════════════════════════════════
 # Tool Registry

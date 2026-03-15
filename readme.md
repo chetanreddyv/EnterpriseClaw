@@ -20,10 +20,11 @@ EnterpriseClaw solves the "Orchestrator Clash" by splitting the brain from the b
 
 * **🛡️ True Human-In-The-Loop (HITL):** Dangerous "Write" operations (like `exec_command` or `send_email`) instantly pause the LangGraph state. The LLM's intent is routed to the user (via Telegram or Web) for approval, rejection, or feedback. Rejections are fed *back* to the LLM so it can course-correct.
 * **🧠 Enterprise-Grade Memory (MemoryGate):** Unlike standard frameworks that dump agent memory into a single, fragile markdown file, EnterpriseClaw uses a dual-layer memory architecture powered by SQLite and Zvec vector indexing for lightning-fast, semantic context retrieval.
-* **🔌 The Standard Library & Skill Auto-Loader:** EnterpriseClaw comes pre-equipped with a "Standard Library" of core capabilities (`exec_command`, `web_search`). You don't need to specify these in configuration files—the agent intrinsically knows how to use them, and they are permanently protected by HITL. For custom APIs, simply drop a `SKILL.md` file into the `/skills` directory and the framework binds Python tools on the fly.
+* **🔌 JIT Skill Retrieval + Dynamic Tool Scoping:** The Supervisor delegates an objective with a single `domain` (`browser`, `exec`, or `all`), and the Worker performs just-in-time skill retrieval from the vector index using that objective. The Worker binds tools inside that domain and applies matched skill metadata to keep context and blast radius tight.
 * **🚦 The Gateway Pattern:** The core execution engine has zero knowledge of the delivery channel. A central `ChannelManager` translates abstract agent actions into UI-specific formats (Telegram Inline Keyboards, Web UI buttons, etc.).
-* **💓 System Heartbeat:** A lightweight asynchronous loop wakes the agent every 15 minutes to perform time-based tasks natively using `check_current_time` and `schedule_reminder` tools.
+* **💓 System Heartbeat:** A lightweight asynchronous loop wakes the agent every 15 minutes to perform time-based tasks natively using the injected system clock context and `schedule_reminder`.
 * **👀 Background Process Monitoring:** When the agent executes a background shell command, it doesn't just blind-fire it. EnterpriseClaw attaches an async monitor to capture `stdout`/`stderr` and automatically notifies the primary agent thread the moment the process concludes.
+* **🕒 Strict Temporal Awareness:** Supervisor and Worker prompts inject current UTC and local time in a dedicated "System Clock" section, improving time-sensitive reasoning without requiring explicit time-tool calls for basic date awareness.
 
 * **🔀 Model Agnosticism:** Swap the underlying LLM at runtime without touching code. Backed by LangChain's `init_chat_model` factory, each conversation thread stores its preferred model in the SQLite checkpointer — meaning different threads can run different providers simultaneously, and preferences survive restarts.
 
@@ -84,9 +85,30 @@ Send `/model <provider/model>` from **any channel** (Telegram or Web) to hot-swa
 EnterpriseClaw provides several slash commands to manipulate agent state mid-conversation without needing to restart the server or edit config files:
 
 *   `/model <provider/model>` — Hot-swap the underlying LLM for the current thread (e.g. `/model openai/gpt-4o`).
-*   `/permit <tool_name>` — Auto-approve a specific tool for the current thread. The agent will no longer pause for Human-In-The-Loop approval when using this tool (e.g., `/permit browser_click`).
-*   `/deny <tool_name>` — Revoke auto-approval for a tool. The agent will once again pause for HITL approval.
-*   `/tools` — Print a list of all tools available to the agent and their current security status (Auto-Approved vs Requires Approval).
+*   `/permit <tool_name>` — Permit a tool for the current thread. For high-risk tools (for example `exec_command`), this bypasses repeated HITL prompts until revoked.
+*   `/deny <tool_name>` — Force confirmation for an auto-allowed tool (for example `browser_navigate` or `delegate_task`) in the current thread.
+*   `/tools` — Print all tools and their thread-specific policy state (`autonomous`, `auto-allowed`, `permitted`, `denied/requires approval`).
+
+## 🔁 Delegation Contract (Current)
+
+Complex multi-step execution should be delegated through:
+
+```python
+delegate_task(
+	objective="Go to example.com, extract headline text, and summarize it.",
+	domain="browser",
+	max_steps=15,
+)
+```
+
+- `objective`: specific task goal for the Worker.
+- `domain`: strict worker scope for this delegation (`browser`, `exec`, or `all`).
+- `max_steps`: worker loop cap.
+
+Notes:
+- Domain categories are resolved dynamically from modules in `mcp_servers/`.
+- Worker always retains `escalate_to_supervisor` as a safety exit.
+- Worker execution mode is metadata-aware: stateful tools run sequentially, read-only sets may run concurrently.
 
 ### 1. Installation
 
@@ -127,7 +149,7 @@ uv run python app.py
 
 ```
 
-*Note: The FastAPI server will instantly return HTTP 200s for webhooks, pushing the heavy lifting to the background `LaneManager` queues.*
+*Note: The FastAPI server returns quickly for webhook requests while orchestration continues asynchronously in the LangGraph runtime.*
 
 ---
 
@@ -142,32 +164,38 @@ EnterpriseClaw introduces **MemoryGate**, a highly-scalable, dual-layer memory a
 
 ---
 
-## 🛠️ Creating Skills (The Magic)
+## 🛠️ Creating Skills (JIT Retrieval)
 
-EnterpriseClaw uses a **Universal Skill Auto-Loader**. You don't need to write Python boilerplate to teach the agent a new workflow.
+Skill files are used as prompt-time behavior modules. The Worker retrieves relevant skills at runtime based on the delegated objective.
 
-Just create a Markdown file in `skills/my_new_skill/skill.md`:
+Create a Markdown file in `skills/my_new_skill/skill.md`:
 
 ```markdown
 ---
 name: github_manager
 description: Manage GitHub repositories, check PRs, and review issues.
-tools: exec_command, list_files
 ---
+
+### TRIGGER_EXAMPLES
+- "check open pull requests in my repo"
+- "review latest github issues"
+### END_TRIGGER_EXAMPLES
 
 # GitHub Manager
 You are a senior developer managing a GitHub repository. 
-When asked to check PRs, use the `gh` CLI via the `exec_command` tool.
+When asked to check PRs, gather facts first and then propose safe next actions.
 Always verify the current directory before running commands.
 
 ```
 
 **What happens automatically:**
 
-1. EnterpriseClaw reads the `tools` frontmatter.
-2. It fetches `exec_command` and `list_files` from the Global Tool Registry.
-3. It binds those tools to the LLM.
-4. It flags `exec_command` as a dangerous "write" action, ensuring the agent pauses for your permission before executing any bash scripts.
+1. Skills are embedded into the skill vector index at startup.
+2. On delegation, Worker queries skills using the task `objective`.
+3. Only matched skill content is injected into the Worker prompt (JIT).
+4. Tool binding is controlled by delegated `domain` plus matched skill metadata.
+
+To add new executable tools, register them in `mcp_servers/<module>.py` via `TOOL_REGISTRY`. The module name determines the category automatically (`web_tools.py` -> `web`, `exec_tools.py` -> `exec`).
 
 ---
 
@@ -176,7 +204,7 @@ Always verify the current directory before running commands.
 EnterpriseClaw is built on three distinct layers, providing an enterprise-grade execution environment superior to typical monolithic agent loops:
 
 1. **The Gateway API (`app.py`):** Fast, stateless endpoints that stream asynchronous LangGraph invocations directly from user inputs and the system heartbeat.
-2. **The Control Plane (LangGraph):** A continuous execution loop that steps through the state machine, executes read-only tools autonomously (Tiered Autonomy), and suspends state to SQLite when HITL is required for dangerous write actions.
+2. **The Control Plane (LangGraph):** A Supervisor graph delegates to Worker subgraphs. Workers start with a SkillContext step (JIT retrieval), then execute in an action-observation loop with category-scoped tools and HITL enforcement.
 3. **The Channel Manager (`core/channel_manager.py`):** Intercepts outputs from the Control Plane and formats them for the specific user interface (e.g., rendering an "Approve/Reject" button in Telegram or Web Chat).
 
 ## 🤝 Contributing

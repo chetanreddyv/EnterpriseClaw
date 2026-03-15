@@ -4,13 +4,14 @@ core/nodes/supervisor_nodes.py — Nodes for the Supervisor (MainGraph).
 The Supervisor is lightweight. It handles:
 1. Intent: Fetch memory context, normalize user input.
 2. Prompt Building: Identity + memory + GC + token pruning.
-3. Execution: Fixed tool set (web_search, check_time, delegate_task).
+3. Execution: Fixed tool set (web_search, save memory, delegate_task).
 4. Tool Execution: Runs supervisor-level tools.
 """
 
 import logging
 from typing import Dict, Any
 from pathlib import Path
+from datetime import datetime, timezone
 
 from langchain_core.messages import (
     SystemMessage, HumanMessage, AIMessage, ToolMessage,
@@ -19,7 +20,7 @@ from langchain_core.messages import (
 from langchain_core.runnables import RunnableConfig
 
 from core.graphs.states import SupervisorState
-from core.llm import init_agent_llm
+from core.llm import init_agent_llm, is_llm_connection_error
 from mcp_servers import GLOBAL_TOOL_REGISTRY
 
 logger = logging.getLogger(__name__)
@@ -30,9 +31,17 @@ IDENTITY_FILE = Path(__file__).parent.parent.parent / "skills" / "identity" / "s
 # The Supervisor's fixed tool set — simple, read-only + delegation.
 SUPERVISOR_TOOLS = {
     "web_search", "web_fetch",
-    "check_current_time", "save_to_long_term_memory",
+    "save_to_long_term_memory",
     "delegate_task",
 }
+
+DIAGNOSTIC_TOOL_MARKERS = (
+    "error",
+    "rejected",
+    "escalated",
+    "failed",
+    "skipped",
+)
 
 
 def _load_identity_prompt() -> str:
@@ -72,28 +81,7 @@ async def supervisor_intent_node(state: SupervisorState) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"SupervisorIntent: Memory retrieval failed: {e}")
 
-    # 3. Resolve Skills (for prompt enrichment, not tool binding)
-    skill_prompts = state.get("skill_prompts", "")
-    matched_skill_names = state.get("active_skills", [])
-    
-    try:
-        from memory.retrieval import memory_retrieval
-        new_prompts, new_matched = await memory_retrieval.get_relevant_skills(original_query)
-        logger.info(f"SupervisorIntent: Matched skills: {new_matched}")
-        
-        # Sticky routing: retain active skill on short follow-ups
-        if not new_matched and matched_skill_names:
-            pass
-        else:
-            skill_prompts = new_prompts
-            matched_skill_names = new_matched
-    except Exception as e:
-        logger.warning(f"SupervisorIntent: Skill retrieval failed: {e}")
-        if not skill_prompts:
-            skill_prompts = "You are a helpful personal assistant. Be concise and accurate."
-
     logger.info(f"SupervisorIntent: Retrieved {len(memory_context)} bytes of memory context.")
-    logger.info(f"SupervisorIntent: Matched skills: {matched_skill_names}")
 
     # 4. Inject user message
     messages_update = []
@@ -104,8 +92,6 @@ async def supervisor_intent_node(state: SupervisorState) -> Dict[str, Any]:
         "user_input": user_input,
         "original_query": original_query,
         "memory_context": memory_context,
-        "skill_prompts": skill_prompts,
-        "active_skills": matched_skill_names,
         "messages": messages_update,
         "tool_failure_count": 0,
         "_retry": False,
@@ -122,36 +108,53 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
     Reuses the V2 token-aware pruning and GC logic.
     No transient_tool_output handling — Workers manage their own ephemeral state.
     """
-    # 1. ── Construct system prompt: Identity → Memory → Skills ────
+    # 1. ── Construct modular system prompt ───────────────────────
     prompt_parts = []
 
+    # Section 1: System Clock
+    now_utc = datetime.now(timezone.utc)
+    now_local = datetime.now().astimezone()
+    prompt_parts.append(
+        "## System Clock\n"
+        f"- Current UTC Time: {now_utc.isoformat()}\n"
+        f"- Local System Time: {now_local.isoformat()}\n"
+        f"- Local Timezone: {now_local.tzname()}\n"
+        "- Treat this clock as authoritative for temporal reasoning."
+    )
+
+    # Section 2: Core Identity
     identity_prompt = _load_identity_prompt()
     if identity_prompt:
-        prompt_parts.append(identity_prompt)
+        prompt_parts.append(f"## Core Identity\n{identity_prompt}")
 
+    # Section 3: User Context
     memory_context = state.get("memory_context")
     if memory_context:
-        prompt_parts.append(f"## User Context (from long-term memory)\n{memory_context}")
+        prompt_parts.append(f"## User Context\n{memory_context}")
 
-    skill_prompts = state.get("skill_prompts")
-    if skill_prompts:
-        prompt_parts.append(skill_prompts)
-
-    # Active Memory + Delegation instructions
-    delegation_prompt = (
-        "## Active Memory & Task Delegation\n"
-        "You have direct control over your long-term memory and can delegate complex tasks.\n"
-        "- To remember facts, use the `save_to_long_term_memory` tool.\n"
-        "- For time awareness, use `check_current_time`.\n"
-        "- For quick factual lookups, use `web_search` or `web_fetch`.\n"
-        "- For complex multi-step tasks (browsing the web, running code, filling forms), "
-        "use `delegate_task` with an objective and tool_domain ('browser', 'exec', or 'all').\n"
-        "  Example: delegate_task(objective='Go to example.com and describe the page', tool_domain='browser')\n"
+    # Section 4: Core Capabilities
+    capabilities_prompt = (
+        "## Core Capabilities\n"
+        "- Use `save_to_long_term_memory` to persist durable user facts and preferences.\n"
+        "- Use the System Clock section above for time-sensitive decisions.\n"
+        "- Use `web_search` and `web_fetch` for factual lookups.\n"
+        "- Use `delegate_task` for complex multi-step execution via specialized Worker domains.\n"
+        "- Domain `browser`: web navigation, scraping, and form interaction.\n"
+        "- Domain `exec`: shell/code execution and file operations.\n"
+        "- Domain `all`: broad multi-tool reasoning with tight safeguards."
     )
-    prompt_parts.append(delegation_prompt)
+    prompt_parts.append(capabilities_prompt)
 
-    status_prompt = "## Operational Status\n- You are in LIVE mode.\n- TOOL CALLING IS ENABLED."
-    prompt_parts.append(status_prompt)
+    # Section 5: Rules
+    rules_lines = [
+        "## Rules",
+        "- You are in LIVE mode and TOOL CALLING IS ENABLED.",
+        "- Delegate complex tasks via `delegate_task` with a focused objective and a single domain.",
+        "- Use only these delegation domains: browser, exec, all.",
+        "- Example: delegate_task(objective='Go to example.com and describe the page', domain='browser').",
+        "- Never mention delegation mechanics to the user. Return only outcome-focused responses.",
+    ]
+    prompt_parts.append("\n".join(rules_lines))
 
     full_system_prompt = "\n\n---\n\n".join(prompt_parts) + (
         "\n\nALWAYS format your output using standard Markdown. Do NOT use HTML tags. "
@@ -198,11 +201,18 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
                     m = m.copy(update={"content": truncated})
         processed_history.append(m)
 
-    # Hard cap at 6 messages
-    if len(processed_history) > 6:
-        processed_history = processed_history[-6:]
+    # 1. Identify the most recent HumanMessage index
+    last_human_idx = next(
+        (i for i in reversed(range(len(processed_history)))
+         if isinstance(processed_history[i], HumanMessage)),
+        0
+    )
 
-    temp_messages = [sys_msg] + processed_history
+    # 2. Slice the history to start EXACTLY at the last Human message,
+    # capturing the current active loop without dropping the prompt.
+    active_turn_history = processed_history[last_human_idx:]
+
+    temp_messages = [sys_msg] + active_turn_history
 
     trimmed_messages = trim_messages(
         temp_messages,
@@ -229,8 +239,7 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
     
     # Context summary
     mem_len = len(state.get("memory_context") or "")
-    skill_list = state.get("active_skills") or []
-    logger.info(f"═ 📜 Memory Context: {mem_len} bytes | 🛠 Matched Skills: {skill_list}")
+    logger.info(f"═ 📜 Memory Context: {mem_len} bytes")
 
     # History summary
     logger.info(f"═ 💬 History: {len(retained_history)} messages retained.")
@@ -243,6 +252,75 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
         "messages": delete_cmds,
         "_formatted_prompt": [sys_msg] + retained_history,
     }
+
+
+def _has_diagnostic_signal(content: str) -> bool:
+    text = str(content).strip().lower()
+    if not text:
+        return False
+    return any(marker in text for marker in DIAGNOSTIC_TOOL_MARKERS)
+
+
+async def supervisor_compaction_node(state: SupervisorState) -> Dict[str, Any]:
+    """
+    Remove intermediate tool-call artifacts from the latest completed turn.
+    Keeps Human + final AI response while preserving diagnostic traces.
+    """
+    if state.get("_retry"):
+        return {}
+
+    messages = state.get("messages", [])
+    if len(messages) < 3:
+        return {}
+
+    final_ai_idx = -1
+    for idx in range(len(messages) - 1, -1, -1):
+        msg = messages[idx]
+        if isinstance(msg, AIMessage) and not getattr(msg, "tool_calls", []):
+            content = msg.content
+            if isinstance(content, str) and content.strip():
+                final_ai_idx = idx
+                break
+
+    if final_ai_idx <= 0:
+        return {}
+
+    human_idx = -1
+    for idx in range(final_ai_idx - 1, -1, -1):
+        if isinstance(messages[idx], HumanMessage):
+            human_idx = idx
+            break
+
+    if human_idx < 0:
+        return {}
+
+    candidate_segment = messages[human_idx + 1:final_ai_idx]
+    if not candidate_segment:
+        return {}
+
+    # Preserve full trace for problematic turns.
+    for msg in candidate_segment:
+        if isinstance(msg, ToolMessage) and _has_diagnostic_signal(msg.content):
+            return {}
+
+    remove_ids: list[str] = []
+    for msg in candidate_segment:
+        msg_id = getattr(msg, "id", None)
+        if not msg_id:
+            continue
+        if isinstance(msg, ToolMessage):
+            remove_ids.append(msg_id)
+        elif isinstance(msg, AIMessage) and getattr(msg, "tool_calls", []):
+            remove_ids.append(msg_id)
+
+    if not remove_ids:
+        return {}
+
+    logger.info(
+        "SupervisorCompaction: Removing %d intermediate tool messages from latest turn.",
+        len(remove_ids),
+    )
+    return {"messages": [RemoveMessage(id=msg_id) for msg_id in remove_ids]}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -294,6 +372,28 @@ async def supervisor_executor_node(state: SupervisorState, config: RunnableConfi
 
     except Exception as e:
         logger.error(f"SupervisorExecutor: LLM API Call Failed: {e}", exc_info=True)
+        if is_llm_connection_error(e):
+            active_model = state.get("active_model") or "default"
+            guidance = "Please check your configured model backend and try again."
+            if str(active_model).startswith("lmstudio/"):
+                guidance = (
+                    "LM Studio appears unreachable at the configured local endpoint. "
+                    "Please ensure LM Studio is running and the server is started (default: http://localhost:1234/v1)."
+                )
+
+            return {
+                "messages": [
+                    AIMessage(
+                        content=(
+                            f"I could not reach the model backend for `{active_model}` due to a connection error. "
+                            f"{guidance}"
+                        )
+                    )
+                ],
+                "_retry": False,
+                "tool_failure_count": 0,
+            }
+
         return {"_retry": True}
 
 
@@ -341,6 +441,7 @@ async def supervisor_tools_node(state: SupervisorState, config: RunnableConfig) 
             # Inject active_model into delegate_task if available
             if action_name == "delegate_task":
                 tool_args["active_model"] = state.get("active_model", "")
+                tool_args["approved_tools"] = state.get("approved_tools", [])
 
             if hasattr(func, "ainvoke"):
                 result = await func.ainvoke(tool_args, config=config)

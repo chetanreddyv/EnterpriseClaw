@@ -25,6 +25,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
 )
+# Suppress high-frequency reload file-change chatter from watchfiles.
+logging.getLogger("watchfiles").setLevel(logging.WARNING)
+logging.getLogger("watchfiles.main").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -50,22 +53,44 @@ async def _handle_commands(chat_id: str, text: str, platform: str) -> bool:
         return True
 
     if cmd in ("/permit", "/deny") and len(parts) > 1:
+        from core.hitl import get_deny_marker
+
         state = await graph.aget_state({"configurable": {"thread_id": chat_id}})
         approved = set(state.values.get("approved_tools") or [])
+        target_tool = parts[1].strip()
+        deny_marker = get_deny_marker(target_tool)
+
         if cmd == "/permit":
-            approved.add(parts[1])
-            msg = f"🔓 `{parts[1]}` is now AUTO-APPROVED"
+            approved.discard(deny_marker)
+            approved.add(target_tool)
+            msg = f"🔓 `{target_tool}` is now AUTO-APPROVED"
         else:
-            approved.discard(parts[1])
-            msg = f"🔒 `{parts[1]}` now REQUIRES approval"
-        await graph.aupdate_state({"configurable": {"thread_id": chat_id}}, {"approved_tools": list(approved)})
+            approved.discard(target_tool)
+            approved.add(deny_marker)
+            msg = f"🔒 `{target_tool}` now REQUIRES approval"
+
+        await graph.aupdate_state(
+            {"configurable": {"thread_id": chat_id}},
+            {"approved_tools": sorted(approved)},
+        )
         await channel_manager.send_message(platform, chat_id, msg)
         return True
 
     if cmd == "/tools":
         from core.hitl import get_tool_tier
         from mcp_servers import GLOBAL_TOOL_REGISTRY
-        approved = set((await graph.aget_state({"configurable": {"thread_id": chat_id}})).values.get("approved_tools") or [])
+
+        policy_entries = set((await graph.aget_state({"configurable": {"thread_id": chat_id}})).values.get("approved_tools") or [])
+        approved = {
+            p for p in policy_entries
+            if isinstance(p, str) and p and not p.startswith("deny:")
+        }
+        denied = {
+            p[len("deny:"):]
+            for p in policy_entries
+            if isinstance(p, str) and p.startswith("deny:") and p[len("deny:"):]
+        }
+
         all_tools = sorted(GLOBAL_TOOL_REGISTRY.keys())
         lines = []
         for t in all_tools:
@@ -73,7 +98,12 @@ async def _handle_commands(chat_id: str, text: str, platform: str) -> bool:
             if tier == "autonomous":
                 lines.append(f"🟢 `{t}`")
             elif tier == "allowed":
-                lines.append(f"🔵 `{t}` (auto-allowed)")
+                if t in denied:
+                    lines.append(f"🔒 `{t}` (denied, requires approval)")
+                elif t in approved:
+                    lines.append(f"🔓 `{t}` (permitted)")
+                else:
+                    lines.append(f"🔵 `{t}` (auto-allowed)")
             elif t in approved:
                 lines.append(f"🔓 `{t}` (permitted)")
             else:

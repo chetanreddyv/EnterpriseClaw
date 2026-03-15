@@ -4,9 +4,9 @@ core/graphs/worker.py — The Worker SubGraph Definition.
 An ephemeral, specialized graph for multi-step task execution.
 Operates in a strict Action-Observation loop with State Amnesia.
 
-Pipeline: PromptBuilder → Executor → [Tools → PromptBuilder | Summarize → END]
-                                         ↑              |
-                                         └──────────────┘
+Pipeline: SkillContext → PromptBuilder → Executor → [Tools → PromptBuilder | Summarize → END]
+                                                        ↑              |
+                                                        └──────────────┘
 
 Key properties:
 - No persistent memory or conversation history.
@@ -18,10 +18,11 @@ Key properties:
 """
 
 from langgraph.graph import StateGraph, END
-from langgraph.pregel.types import RetryPolicy
+from langgraph.types import RetryPolicy
 
 from core.graphs.states import WorkerState
 from core.nodes.worker_nodes import (
+    worker_skill_context_node,
     worker_prompt_builder_node,
     worker_executor_node,
     worker_tools_node,
@@ -32,15 +33,15 @@ from core.nodes.tool_error import tool_error_node
 
 def route_after_worker_executor(state: WorkerState) -> str:
     """Determine where to go after the Worker LLM generates a response."""
+    # Blank generation / transport error recovery must take priority.
+    if state.get("_retry"):
+        return "tool_error"
+
     messages = state.get("messages", [])
     if not messages:
         return "summarize"
 
     last_msg = messages[-1]
-
-    # Blank generation recovery
-    if state.get("_retry"):
-        return "tool_error"
 
     # If the LLM made tool calls, execute them
     if getattr(last_msg, "tool_calls", []):
@@ -84,14 +85,15 @@ def build_worker_graph():
     """
     Constructs a generic Worker graph.
     
-    The Worker is parameterized by `tool_domain` in its initial state,
-    which determines which tools are bound (browser, exec, or all).
+    The Worker is parameterized by `required_tool_categories` in its
+    initial state, which determines dynamic tool binding scope.
     """
     workflow = StateGraph(WorkerState)
 
     retry_policy = RetryPolicy(max_attempts=3)
 
     # Add Nodes
+    workflow.add_node("skill_context", worker_skill_context_node, retry=retry_policy)
     workflow.add_node("prompt_builder", worker_prompt_builder_node, retry=retry_policy)
     workflow.add_node("executor", worker_executor_node, retry=retry_policy)
     workflow.add_node("tools", worker_tools_node, retry=retry_policy)
@@ -99,9 +101,10 @@ def build_worker_graph():
     workflow.add_node("summarize", worker_summarize_node)
 
     # Entry Point
-    workflow.set_entry_point("prompt_builder")
+    workflow.set_entry_point("skill_context")
 
     # Core flow
+    workflow.add_edge("skill_context", "prompt_builder")
     workflow.add_edge("prompt_builder", "executor")
 
     # Conditional routing post-executor

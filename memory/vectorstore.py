@@ -12,7 +12,7 @@ import os
 import uuid
 import shutil
 import re
-from typing import List, Tuple
+from typing import Any, Dict, List, Tuple
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -37,6 +37,7 @@ MEMORY_SIMILARITY_THRESHOLD = float(os.getenv("MEMORY_SIMILARITY_THRESHOLD", "0.
 TRIGGER_PATTERN = re.compile(r'### TRIGGER_EXAMPLES(.*?)### END_TRIGGER_EXAMPLES', re.DOTALL)
 NAME_PATTERN = re.compile(r"^name:\s*(.+)$", re.MULTILINE)
 DESC_PATTERN = re.compile(r"^description:\s*(.+)$", re.MULTILINE)
+TOOLS_PATTERN = re.compile(r"^tools:\s*(.+)$", re.MULTILINE)
 
 
 def chunked_iterable(iterable, size):
@@ -62,7 +63,7 @@ class ZvecMemoryStore:
         self._embedding_model = None  # Lazy init
         
         # RAM Cache to prevent Disk I/O during retrievals
-        self._skill_cache = {}
+        self._skill_cache: Dict[str, Any] = {}
 
     # ─── Async Zvec Wrappers (Prevents Event Loop Blocking) ─────────────
 
@@ -224,7 +225,15 @@ class ZvecMemoryStore:
         return "\n".join(f"- [{item['kind']}] {item['text']}" for item in top_items)
 
     async def get_relevant_skills(self, query: str, top_k: int = 2) -> tuple[str, list[str]]:
-        fallback = ("You are a helpful personal assistant. Be concise and accurate.", [])
+        prompts, skill_names, _ = await self.get_relevant_skills_with_metadata(query, top_k=top_k)
+        return prompts, skill_names
+
+    async def get_relevant_skills_with_metadata(
+        self,
+        query: str,
+        top_k: int = 2,
+    ) -> tuple[str, list[str], dict[str, list[str]]]:
+        fallback = ("You are a helpful personal assistant. Be concise and accurate.", [], {})
         if not self.skill_collection:
             return fallback
 
@@ -269,17 +278,40 @@ class ZvecMemoryStore:
 
             prompts = []
             matched_skill_names = []
+            skill_tools: dict[str, list[str]] = {}
             for skill_name in skill_names:
                 # 💥 NO DISK I/O HERE: Pull straight from RAM cache
-                cached_content = self._skill_cache.get(skill_name)
+                cache_entry = self._skill_cache.get(skill_name)
+
+                cached_content = ""
+                declared_tools_raw: list[str] = []
+                if isinstance(cache_entry, dict):
+                    cached_content = str(cache_entry.get("content", "")).strip()
+                    raw_tools = cache_entry.get("tools") or []
+                    if isinstance(raw_tools, list):
+                        declared_tools_raw = raw_tools
+                elif cache_entry:
+                    # Backward-compat path for existing tests/cache stubs.
+                    cached_content = str(cache_entry).strip()
+
                 if cached_content:
                     prompts.append(f"## {skill_name.replace('_', ' ').title()}\n{cached_content}")
                     matched_skill_names.append(skill_name)
 
+                    normalized_declared_tools: list[str] = []
+                    for tool_name in declared_tools_raw:
+                        if isinstance(tool_name, str):
+                            value = tool_name.strip()
+                            if value and value not in normalized_declared_tools:
+                                normalized_declared_tools.append(value)
+
+                    if normalized_declared_tools:
+                        skill_tools[skill_name] = normalized_declared_tools
+
             if not prompts:
                 return fallback
 
-            return "\n\n".join(prompts), matched_skill_names
+            return "\n\n".join(prompts), matched_skill_names, skill_tools
 
         except Exception as e:
             logger.error(f"Zvec skills query failed: {e}")
@@ -440,6 +472,7 @@ class ZvecMemoryStore:
             content = skill_file.read_text()
             name = skill_id
             description = ""
+            declared_tools: list[str] = []
 
             # Extract Frontmatter via regex
             if content.startswith("---"):
@@ -450,6 +483,10 @@ class ZvecMemoryStore:
                     if name_match: name = name_match.group(1).strip()
                     desc_match = DESC_PATTERN.search(frontmatter)
                     if desc_match: description = desc_match.group(1).strip()
+                    tools_match = TOOLS_PATTERN.search(frontmatter)
+                    if tools_match:
+                        raw_tools = [item.strip() for item in tools_match.group(1).split(",")]
+                        declared_tools = [item for item in raw_tools if item]
 
             # Extract Trigger Examples
             trigger_match = TRIGGER_PATTERN.search(content)
@@ -468,7 +505,10 @@ class ZvecMemoryStore:
 
             # RAM-Cache the clean content for zero-IO retrievals
             clean_content = TRIGGER_PATTERN.sub('', content).strip()
-            self._skill_cache[skill_id] = clean_content
+            self._skill_cache[skill_id] = {
+                "content": clean_content,
+                "tools": declared_tools,
+            }
 
         if not skills_to_embed:
             return

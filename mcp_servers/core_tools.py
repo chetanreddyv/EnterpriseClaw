@@ -13,16 +13,6 @@ REMINDERS_FILE = Path("data/reminders.json")
 OBSERVATION_SEPARATOR = "\n===OBSERVATION===\n"
 
 @tool
-def check_current_time() -> str:
-    """
-    Returns the current date and time in ISO format (UTC) and the local system timezone.
-    Use this to orient yourself chronologically before making time-sensitive decisions or creating reminders.
-    """
-    now = datetime.now(timezone.utc)
-    local = datetime.now().astimezone()
-    return f"Current UTC Time: {now.isoformat()}\nLocal System Time: {local.isoformat()}\nTimezone: {local.tzname()}"
-
-@tool
 def schedule_reminder(message: str, time_str: str) -> str:
     """
     Schedule a reminder or future task. The heartbeat system will check this schedule
@@ -89,7 +79,13 @@ async def save_to_long_term_memory(fact: str) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 @tool
-async def delegate_task(objective: str, tool_domain: str, max_steps: int = 15, active_model: str = "") -> str:
+async def delegate_task(
+    objective: str,
+    domain: str,
+    max_steps: int = 15,
+    active_model: str = "",
+    approved_tools: list[str] | None = None,
+) -> str:
     """
     Delegate a complex, multi-step task to a specialized Worker agent.
     The Worker will execute the task autonomously and return a summary.
@@ -102,21 +98,42 @@ async def delegate_task(objective: str, tool_domain: str, max_steps: int = 15, a
     Args:
         objective (str): A clear, specific description of what the Worker should accomplish.
             Example: "Navigate to greenhouse.io and apply for the Software Engineer role."
-        tool_domain (str): Which tools the Worker should use. One of:
-            - "browser" — Web browsing tools (navigate, click, type, etc.)
-            - "exec" — Terminal/code execution tools
-            - "all" — All available tools
+        domain (str): Worker execution domain. One of:
+            - "browser": web navigation and form interaction workflows.
+            - "exec": terminal/code execution workflows.
+            - "all": broad multi-tool reasoning workflows.
         max_steps (int): Maximum number of action steps before the Worker gives up. Default 15.
         active_model (str): Internal use only.
+        approved_tools (list[str] | None): Internal HITL policy directives inherited from Supervisor.
     """
     from core.graphs.worker import build_worker_graph
 
-    logger.info(f"🚀 Delegating task to Worker [domain={tool_domain}, model={active_model or 'default'}]: {objective}")
+    normalized_domain = str(domain or "").strip().lower()
+    domain_to_categories = {
+        "browser": ["browser"],
+        "exec": ["exec"],
+        "all": ["all"],
+    }
+
+    if normalized_domain not in domain_to_categories:
+        return "Error: `domain` must be one of: browser, exec, all."
+
+    normalized_categories = domain_to_categories[normalized_domain]
+
+    logger.info(
+        "🚀 Delegating task to Worker [domain=%s, model=%s]: %s",
+        normalized_domain,
+        active_model or "default",
+        objective,
+    )
 
     worker_graph = build_worker_graph()
     result = await worker_graph.ainvoke({
         "objective": objective,
-        "tool_domain": tool_domain,
+        "required_tool_categories": normalized_categories,
+        "skill_prompts": "",
+        "active_skills": [],
+        "active_skill_tools": [],
         "max_steps": max_steps,
         "step_count": 0,
         "status": "running",
@@ -126,8 +143,8 @@ async def delegate_task(objective: str, tool_domain: str, max_steps: int = 15, a
         "tool_failure_count": 0,
         "_retry": False,
         "_formatted_prompt": [],
-        "active_model": active_model, 
-        "approved_tools": [],  # Inherited from Supervisor via config if needed
+        "active_model": active_model,
+        "approved_tools": approved_tools or [],
     })
 
     status = result.get("status", "completed")
@@ -244,7 +261,6 @@ async def batch_actions(actions: list, config: RunnableConfig = None) -> str:
 
 # Register tools so they are dynamically loaded by the GLOBAL_TOOL_REGISTRY in __init__.py
 TOOL_REGISTRY = {
-    "check_current_time": check_current_time,
     "schedule_reminder": schedule_reminder,
     "save_to_long_term_memory": save_to_long_term_memory,
     "delegate_task": delegate_task,
