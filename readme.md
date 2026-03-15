@@ -104,19 +104,6 @@ flowchart LR
     W -.->|"Fetch Domain Rules"| M
 ```
 
-### Simple flow (text)
-
-```text
-User (Telegram/Web/CLI)
-  -> app.py entrypoints
-  -> Supervisor graph (intent, prompt, response)
-       -> direct answer OR delegate_task(...)
-  -> Worker graph (objective loop with scoped tools)
-       -> tools execute with HITL checks
-  -> final response
-  -> ChannelManager routes back to interface
-```
-
 Key design idea: the Supervisor handles conversation and memory context, while the Worker handles multi-step execution with stricter scope and loop controls.
 
 ## Safety model (HITL)
