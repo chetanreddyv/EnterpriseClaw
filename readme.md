@@ -1,222 +1,422 @@
-# 🦅 EnterpriseClaw
+# EnterpriseClaw
 
-**A deterministic, highly-scalable agentic framework built for production.**
+EnterpriseClaw is a production-oriented agent orchestration framework built on LangGraph.
+It separates decision-making (Supervisor) from execution (Worker), adds human approval for risky actions, and keeps durable memory in SQLite + vector indexes.
 
-EnterpriseClaw is a stateful AI orchestration engine powered by **LangGraph**. It abandons "black box" agent loops in favor of explicit state machines, strict schema enforcement, and a decoupled Gateway architecture. It is designed to run complex, multi-step agentic workflows with bulletproof Human-In-The-Loop (HITL) safeguards.
+This repository contains everything needed to run the assistant locally through Telegram, a web endpoint, or CLI.
 
-## ⚡ Why EnterpriseClaw?
+## At a glance
 
-Most agent frameworks (like LangChain agents or Pydantic AI) bury the execution loop inside a single runtime method. When tools fail or require human approval, the orchestration breaks, threads block, and context is lost.
+- Deterministic Supervisor/Worker graph architecture.
+- Tiered Human-In-The-Loop (HITL) safety for tool execution.
+- Persistent state via SQLite checkpointing.
+- Long-term memory via SQLite + Zvec vector retrieval.
+- Dynamic tool plugin loading from `mcp_servers/`.
+- Dynamic skill retrieval from `skills/`.
+- Browser automation with Playwright and per-thread sessions.
+- Optional Google Workspace (Gmail/Calendar) tool integration.
 
-EnterpriseClaw solves the "Orchestrator Clash" by splitting the brain from the brawn:
+## What this repo includes
 
-1. **The Brain (LLM + Flat Schemas):** We use native model tool-calling with strictly flattened Pydantic schemas (zero implicit defaults) to eliminate LLM hallucinations and API warnings.
-2. **The Brawn (LangGraph):** The entire execution loop, memory check-pointing, and HITL pausing are handled natively by LangGraph's state machine.
-3. **The Direct Gateway:** Webhooks and API endpoints stream-invoke the LangGraph state machine directly via `astream()`, drastically simplifying background execution without bloated queues.
+### Core runtime
 
----
+- `app.py`: FastAPI entrypoint, Telegram polling/webhook handling, graph lifecycle.
+- `config/settings.py`: environment configuration.
+- `core/graphs/`: LangGraph Supervisor and Worker graph definitions.
+- `core/nodes/`: prompt building, executor, tool nodes, compaction, error handling.
+- `core/hitl.py`: tool approval tier rules.
+- `core/channel_manager.py`: routes responses/approvals to platform adapters.
 
-## ✨ Core Features
+### Interfaces
 
-* **🛡️ True Human-In-The-Loop (HITL):** Dangerous "Write" operations (like `exec_command` or `send_email`) instantly pause the LangGraph state. The LLM's intent is routed to the user (via Telegram or Web) for approval, rejection, or feedback. Rejections are fed *back* to the LLM so it can course-correct.
-* **🧠 Enterprise-Grade Memory (MemoryGate):** Unlike standard frameworks that dump agent memory into a single, fragile markdown file, EnterpriseClaw uses a dual-layer memory architecture powered by SQLite and Zvec vector indexing for lightning-fast, semantic context retrieval.
-* **🔌 JIT Skill Retrieval + Dynamic Tool Scoping:** The Supervisor delegates an objective with a single `domain` (`browser`, `exec`, or `all`), and the Worker performs just-in-time skill retrieval from the vector index using that objective. The Worker binds tools inside that domain and applies matched skill metadata to keep context and blast radius tight.
-* **🚦 The Gateway Pattern:** The core execution engine has zero knowledge of the delivery channel. A central `ChannelManager` translates abstract agent actions into UI-specific formats (Telegram Inline Keyboards, Web UI buttons, etc.).
-* **💓 System Heartbeat:** A lightweight asynchronous loop wakes the agent every 15 minutes to perform time-based tasks natively using the injected system clock context and `schedule_reminder`.
-* **👀 Background Process Monitoring:** When the agent executes a background shell command, it doesn't just blind-fire it. EnterpriseClaw attaches an async monitor to capture `stdout`/`stderr` and automatically notifies the primary agent thread the moment the process concludes.
-* **🕒 Strict Temporal Awareness:** Supervisor and Worker prompts inject current UTC and local time in a dedicated "System Clock" section, improving time-sensitive reasoning without requiring explicit time-tool calls for basic date awareness.
+- `interfaces/telegram.py`: Telegram adapter (messages + approval buttons).
+- `interfaces/web_chat.py`: web UI route and web adapter scaffold.
+- `interfaces/cli.py`: terminal adapter.
+- `templates/chat.html`, `static/css/chat.css`, `static/js/chat.js`: web chat frontend.
 
-* **🔀 Model Agnosticism:** Swap the underlying LLM at runtime without touching code. Backed by LangChain's `init_chat_model` factory, each conversation thread stores its preferred model in the SQLite checkpointer — meaning different threads can run different providers simultaneously, and preferences survive restarts.
+### Tool system
 
-* **🌐 Browser Use:** Control a real Chromium browser via Playwright. Navigate websites, click buttons, fill forms, take screenshots, and extract content — all with HITL safeguards on interaction tools. Each thread gets an isolated browser session with separate cookies and storage.
+- `mcp_servers/__init__.py`: dynamic plugin loader + global tool registry.
+- `mcp_servers/core_tools.py`: delegation, reminders, memory save, batching.
+- `mcp_servers/web_tools.py`: web search/fetch.
+- `mcp_servers/browser_tools.py`: Playwright browser automation tools.
+- `mcp_servers/exec_tools.py`: shell command execution.
+- `mcp_servers/google_workspace.py`: Gmail/Calendar tools.
 
----
+### Memory
 
-## 🌐 Browser Use
+- `memory/db.py`: SQLite storage for conversation history + durable memory items.
+- `memory/vectorstore.py`: Zvec + FastEmbed indexing/retrieval + skill indexing.
+- `memory/retrieval.py`: high-level memory retrieval service.
 
-EnterpriseClaw can control a **real headless Chromium browser** for tasks that require interaction beyond simple HTTP fetching — logging into dashboards, filling forms, clicking through multi-step flows, or scraping JavaScript-rendered content.
+### Skills
 
-### Setup
+- `skills/identity/skill.md`: base assistant identity prompt.
+- `skills/*/skill.md`: task-specific behavior modules used by Worker JIT retrieval.
 
-After installing dependencies, download the Chromium binary (one-time):
+### Setup and scripts
 
-```bash
-playwright install chromium
+- `scripts/onboarding.py`: setup wizard (web and CLI modes).
+- `scripts/google_auth_helper.py`: OAuth helper for Google Workspace tools.
+
+### Tests
+
+- `tests/`: browser tools, memory system, worker architecture, tool behavior, zvec checks.
+
+## Architecture diagram
+
+```mermaid
+flowchart LR
+  %% ===== Channels =====
+  subgraph CH[Client Channels]
+    U((User))
+    TG[Telegram]
+    WEB[Web Chat / API]
+    CLI[CLI]
+  end
+
+  %% ===== Gateway =====
+  subgraph GW[Gateway and Delivery Layer]
+    APP[FastAPI Gateway app.py]
+    CM[ChannelManager]
+    HB[System Heartbeat]
+  end
+
+  %% ===== Control Plane =====
+  subgraph CP[LangGraph Control Plane]
+    SUP[Supervisor Graph]
+    WRK[Worker Graph]
+    HITL{HITL Approval Gate}
+  end
+
+  %% ===== Tooling =====
+  subgraph TR[Tool Runtime mcp_servers]
+    REG[Global Tool Registry]
+    TCORE[Core Tools]
+    TWEB[Web Tools]
+    TBROWSER[Browser Tools]
+    TEXEC[Exec Tools]
+    TGW[Google Workspace Tools]
+  end
+
+  %% ===== Memory =====
+  subgraph MP[Memory and Persistence]
+    MEM[Memory Retrieval Service]
+    CK[(checkpoints_v2.db)]
+    DB[(agent_session.db)]
+    ZV[(zvec_index + zvec_skills)]
+    SK[[skills/*.md]]
+  end
+
+  %% User/channel ingress
+  U --> TG
+  U --> WEB
+  U --> CLI
+  TG --> APP
+  WEB --> APP
+  CLI --> APP
+  HB --> APP
+
+  %% Main orchestration
+  APP --> SUP
+  SUP -->|direct response| CM
+  SUP -->|delegate_task| WRK
+  WRK --> HITL
+  HITL -->|approved| REG
+  HITL -->|needs user decision| CM
+  REG --> TCORE
+  REG --> TWEB
+  REG --> TBROWSER
+  REG --> TEXEC
+  REG --> TGW
+  TCORE --> WRK
+  TWEB --> WRK
+  TBROWSER --> WRK
+  TEXEC --> WRK
+  TGW --> WRK
+  WRK -->|result summary| SUP
+
+  %% Outbound delivery
+  CM --> TG
+  CM --> WEB
+  CM --> CLI
+
+  %% Memory and persistence links
+  SUP <--> MEM
+  WRK <--> MEM
+  MEM <--> DB
+  MEM <--> ZV
+  SK --> MEM
+  APP <--> CK
+
+  %% Visual style
+  classDef channel fill:#FFF5D9,stroke:#C48A00,color:#4A3500,stroke-width:1.5px;
+  classDef gateway fill:#E9F4FF,stroke:#2D6EA8,color:#11324D,stroke-width:1.5px;
+  classDef control fill:#EAF9EF,stroke:#2D8A57,color:#0F3F25,stroke-width:1.5px;
+  classDef tool fill:#FFF0E3,stroke:#C25A00,color:#4A2200,stroke-width:1.5px;
+  classDef memory fill:#FCEEF2,stroke:#B23A5A,color:#4A1120,stroke-width:1.5px;
+  classDef decision fill:#FFF8CC,stroke:#B59F00,color:#4A4200,stroke-width:1.5px;
+
+  class U,TG,WEB,CLI channel;
+  class APP,CM,HB gateway;
+  class SUP,WRK control;
+  class REG,TCORE,TWEB,TBROWSER,TEXEC,TGW tool;
+  class MEM,CK,DB,ZV,SK memory;
+  class HITL decision;
 ```
 
-### Tools
+### Simple flow (text)
 
-| Tool | Safety | Description |
-|---|---|---|
-| `browser_navigate(url)` | ✅ Read | Navigate to a URL, returns page title and text |
-| `browser_get_text()` | ✅ Read | Extract visible text from the current page |
-| `browser_screenshot()` | ✅ Read | Save screenshot to `./data/screenshots/` |
-| `browser_click(selector)` | 🔐 HITL | Click an element by CSS selector or visible text |
-| `browser_type(selector, text)` | 🔐 HITL | Type text into an input field |
-| `browser_execute_js(script)` | 🔐 HITL | Run JavaScript on the page |
-
-> **Tiered Autonomy:** Read-only tools (`navigate`, `get_text`, `screenshot`) run freely. Dangerous interaction tools (`click`, `type`, `execute_js`) pause for human approval before executing, exactly like `exec_command`. Browser contexts are isolated per conversation thread, and idle sessions are automatically garbage-collected after 30 minutes.
-
-
-
-## 🔀 Model Agnosticism
-
-Send `/model <provider/model>` from **any channel** (Telegram or Web) to hot-swap the LLM for that specific conversation thread. The preference is persisted in SQLite — it survives restarts and is isolated per-thread.
-
-```
-/model google_genai/gemini-2.5-flash      # default
-/model openai/gpt-4o
-/model anthropic/claude-3-5-sonnet-20241022
-/model ollama/llama3                       # local, no API key needed
+```text
+User (Telegram/Web/CLI)
+  -> app.py entrypoints
+  -> Supervisor graph (intent, prompt, response)
+       -> direct answer OR delegate_task(...)
+  -> Worker graph (objective loop with scoped tools)
+       -> tools execute with HITL checks
+  -> final response
+  -> ChannelManager routes back to interface
 ```
 
-| Provider | Format | Required `.env` key |
-|---|---|---|
-| Google Gemini | `google_genai/<model>` | `GEMINI_API_KEY` |
-| OpenAI | `openai/<model>` | `OPENAI_API_KEY` |
-| Anthropic | `anthropic/<model>` | `ANTHROPIC_API_KEY` |
-| Ollama (local) | `ollama/<model>` | *(none — server must be running)* |
-| Any OpenAI-compat | `openai/<model>` + `OPENAI_BASE_URL` | `OPENAI_API_KEY` |
+Key design idea: the Supervisor handles conversation and memory context, while the Worker handles multi-step execution with stricter scope and loop controls.
 
-> The agent automatically falls back to Gemini if the requested model fails to initialise.
+## Safety model (HITL)
 
-## 🛠️ Interactive Commands
+Tools are split into three tiers in `core/hitl.py`:
 
-EnterpriseClaw provides several slash commands to manipulate agent state mid-conversation without needing to restart the server or edit config files:
+1. `autonomous`: always run without approval.
+2. `allowed`: auto-approved by default, can be locked with `/deny`.
+3. `not_allowed`: requires approval unless explicitly `/permit`-ed.
 
-*   `/model <provider/model>` — Hot-swap the underlying LLM for the current thread (e.g. `/model openai/gpt-4o`).
-*   `/permit <tool_name>` — Permit a tool for the current thread. For high-risk tools (for example `exec_command`), this bypasses repeated HITL prompts until revoked.
-*   `/deny <tool_name>` — Force confirmation for an auto-allowed tool (for example `browser_navigate` or `delegate_task`) in the current thread.
-*   `/tools` — Print all tools and their thread-specific policy state (`autonomous`, `auto-allowed`, `permitted`, `denied/requires approval`).
+Examples:
 
-## 🔁 Delegation Contract (Current)
+- Autonomous: `web_search`, `web_fetch`, `browser_get_text`, `browser_snapshot`.
+- Allowed by default: `delegate_task`, `browser_navigate`.
+- Approval-gated: `browser_click`, `browser_type`, `browser_file_upload`, `exec_command`, `batch_actions`.
 
-Complex multi-step execution should be delegated through:
+## Delegation contract
+
+The Supervisor delegates complex work using:
 
 ```python
 delegate_task(
-	objective="Go to example.com, extract headline text, and summarize it.",
-	domain="browser",
-	max_steps=15,
+    objective="Clear task description",
+    domain="browser",   # one of: browser, exec, all
+    max_steps=15,
 )
 ```
 
-- `objective`: specific task goal for the Worker.
-- `domain`: strict worker scope for this delegation (`browser`, `exec`, or `all`).
-- `max_steps`: worker loop cap.
+- `domain=browser`: browser-category tools.
+- `domain=exec`: command execution tools.
+- `domain=all`: all loaded categories.
 
-Notes:
-- Domain categories are resolved dynamically from modules in `mcp_servers/`.
-- Worker always retains `escalate_to_supervisor` as a safety exit.
-- Worker execution mode is metadata-aware: stateful tools run sequentially, read-only sets may run concurrently.
+Worker safeguards:
 
-### 1. Installation
+- hard step limit,
+- escalation path via `escalate_to_supervisor`,
+- stateful tools executed sequentially,
+- heavy environment observation replaced each turn (prevents prompt bloat).
 
-Clone the repository and install dependencies using `uv` (recommended for strict lockfile management):
+## Quick start
+
+### 1. Prerequisites
+
+- Python 3.12+
+- `uv` package manager
+- Chrome/Chromium available for browser tools
+- API keys (at minimum Google + Telegram for default startup gate)
+
+### 2. Install dependencies
 
 ```bash
 git clone https://github.com/chetanreddyv/EnterpriseClaw.git
 cd EnterpriseClaw
 uv sync
-
+uv run playwright install chromium
 ```
 
-### 2. Configuration
+### 3. Configure environment
 
-Copy the example environment file and add your API keys:
+Recommended (wizard):
+
+```bash
+uv run python scripts/onboarding.py
+```
+
+CLI fallback:
+
+```bash
+uv run python scripts/onboarding.py --cli
+```
+
+Manual setup:
 
 ```bash
 cp .env.example .env
-
 ```
 
-Ensure you set at least one LLM API key and your `TELEGRAM_BOT_TOKEN` (if using the Telegram channel). Add keys for any providers you want to hot-swap into at runtime:
+Minimum keys to pass startup checks in current code:
+
+- `GOOGLE_API_KEY`
+- `TELEGRAM_BOT_TOKEN`
+
+Common optional keys:
+
+- `OPENAI_API_KEY`
+- `LM_STUDIO_BASE_URL` (default local OpenAI-compatible endpoint)
+- `LM_STUDIO_API_KEY`
+- `GOOGLE_TOKEN_JSON` (base64 token for Google Workspace APIs)
+- `ALLOWED_CHAT_IDS`
+- `TELEGRAM_SECRET_TOKEN`
+
+### 4. Optional: Google Workspace auth
+
+If you want Gmail/Calendar tools:
 
 ```bash
-# Required — at least one of these:
-GEMINI_API_KEY=...        # Google Gemini (default)
-OPENAI_API_KEY=...        # OpenAI (optional)
-ANTHROPIC_API_KEY=...     # Anthropic Claude (optional)
-# Ollama: no key needed, just run the server locally
+uv run python scripts/google_auth_helper.py
 ```
 
-### 3. Start the Engine
+Then either keep `token.json` in `scripts/` for local use, or base64-encode it into `GOOGLE_TOKEN_JSON` for deployed environments.
 
-Run the setup wizard to initialize the SQLite checkpointer and vector stores, then start the server:
+### 5. Run
+
+API server:
 
 ```bash
 uv run python app.py
-
 ```
 
-*Note: The FastAPI server returns quickly for webhook requests while orchestration continues asynchronously in the LangGraph runtime.*
+CLI mode:
 
----
-
-## 🧠 Rethinking Agentic Memory: The MemoryGate Engine
-
-Other typical local agent frameworks rely on reading and writing to plain text `.md` files to remember user preferences. This approach is slow, consumes massive amounts of the LLM's token context limit, and is prone to corruption during parallel execution.
-
-EnterpriseClaw introduces **MemoryGate**, a highly-scalable, dual-layer memory architecture:
-
-1. **Short-Term State (Thread Memory):** LangGraph's SQLite checkpointer natively tracks the sliding window of conversational context and pending tool executions. If the server crashes while waiting for human approval, the exact state is flawlessly preserved and instantly thawed upon reboot.
-2. **Long-Term Memory (Agent-Driven Semantic Indexing):** Instead of wasting tokens passively parsing every message, the agent is empowered to actively use a `@tool` (`save_to_long_term_memory`) to save preferences and facts to a Zvec vector index. When a user asks a question, the agent performs a semantic search to inject *only* the highly relevant context into the prompt, saving tokens and vastly improving reasoning accuracy.
-
----
-
-## 🛠️ Creating Skills (JIT Retrieval)
-
-Skill files are used as prompt-time behavior modules. The Worker retrieves relevant skills at runtime based on the delegated objective.
-
-Create a Markdown file in `skills/my_new_skill/skill.md`:
-
-```markdown
----
-name: github_manager
-description: Manage GitHub repositories, check PRs, and review issues.
----
-
-### TRIGGER_EXAMPLES
-- "check open pull requests in my repo"
-- "review latest github issues"
-### END_TRIGGER_EXAMPLES
-
-# GitHub Manager
-You are a senior developer managing a GitHub repository. 
-When asked to check PRs, gather facts first and then propose safe next actions.
-Always verify the current directory before running commands.
-
+```bash
+uv run python app.py --cli
 ```
 
-**What happens automatically:**
+Health check:
 
-1. Skills are embedded into the skill vector index at startup.
-2. On delegation, Worker queries skills using the task `objective`.
-3. Only matched skill content is injected into the Worker prompt (JIT).
-4. Tool binding is controlled by delegated `domain` plus matched skill metadata.
+```bash
+curl http://127.0.0.1:8000/health
+```
 
-To add new executable tools, register them in `mcp_servers/<module>.py` via `TOOL_REGISTRY`. The module name determines the category automatically (`web_tools.py` -> `web`, `exec_tools.py` -> `exec`).
+## Model switching
 
----
+Per-thread model hot swap is supported with `/model`:
 
-## 🏗️ Architecture Deep Dive
+```text
+/model lmstudio/qwen/qwen3.5
+/model openai/gpt-4o
+/model google_genai/gemini-2.5-flash
+/model anthropic/claude-3-5-sonnet-20241022
+```
 
-EnterpriseClaw is built on three distinct layers, providing an enterprise-grade execution environment superior to typical monolithic agent loops:
+Useful commands:
 
-1. **The Gateway API (`app.py`):** Fast, stateless endpoints that stream asynchronous LangGraph invocations directly from user inputs and the system heartbeat.
-2. **The Control Plane (LangGraph):** A Supervisor graph delegates to Worker subgraphs. Workers start with a SkillContext step (JIT retrieval), then execute in an action-observation loop with category-scoped tools and HITL enforcement.
-3. **The Channel Manager (`core/channel_manager.py`):** Intercepts outputs from the Control Plane and formats them for the specific user interface (e.g., rendering an "Approve/Reject" button in Telegram or Web Chat).
+- `/models`: list configured providers.
+- `/permit <tool_name>`: allow a normally gated tool for this thread.
+- `/deny <tool_name>`: force approval for an auto-allowed tool.
+- `/tools`: show tool policy state for this thread.
 
-## 🤝 Contributing
+## API surface
 
-We welcome contributions to make EnterpriseClaw even more robust. Please ensure that all new tools use **Flat Pydantic Schemas** (no `Optional` or default values) to maintain strict LLM determinism.
+Main endpoints in `app.py`:
 
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+- `GET /health`
+- `POST /webhook` (Telegram webhook)
+- `POST /api/v1/chat/{thread_id}`
+- `POST /api/v1/chat/{thread_id}/resume`
+- `POST /api/v1/system/{thread_id}/notify`
+- `GET /chat` (web chat page)
 
-## 📄 License
+Example chat call:
 
-Distributed under the MIT License. See `LICENSE` for more information.
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/chat/demo-thread \
+  -H "Content-Type: application/json" \
+  -d '{"user_input":"Summarize the latest AI headlines"}'
+```
+
+## Tool categories and plugins
+
+Tool plugins are loaded automatically from every Python module in `mcp_servers/` that exposes `TOOL_REGISTRY`.
+
+Category names are derived from file names:
+
+- `browser_tools.py` -> `browser`
+- `exec_tools.py` -> `exec`
+- `web_tools.py` -> `web`
+- `google_workspace.py` -> `google_workspace`
+- `core_tools.py` -> `core`
+
+To add a new tool family:
+
+1. Create `mcp_servers/<name>_tools.py`.
+2. Export `TOOL_REGISTRY = {"tool_name": callable, ...}`.
+3. Restart the app.
+4. (Optional) create/update a matching `skills/<skill>/skill.md` with `tools:` frontmatter.
+
+## Memory architecture
+
+- Conversation history and durable memory items are stored in SQLite.
+- Semantic retrieval uses Zvec + FastEmbed embeddings.
+- Skill embeddings are rebuilt at startup from `skills/`.
+
+Important persisted artifacts under `data/`:
+
+- `checkpoints_v2.db`: LangGraph checkpoint state.
+- `agent_session.db`: history + memory items.
+- `zvec_index/`: long-term memory vector index.
+- `zvec_skills/`: skill vector index.
+- `screenshots/`: browser tool screenshot output.
+- `browser_profile/`: persistent browser session/profile data.
+- `reminders.json`: scheduled reminder data.
+
+## Docker deployment
+
+Build and run:
+
+```bash
+docker compose up --build
+```
+
+Notes:
+
+- App listens on port `8000`.
+- `./data` is mounted into the container for persistence.
+- Healthcheck uses `/health`.
+
+## Testing
+
+Run all tests:
+
+```bash
+uv run pytest
+```
+
+Run focused suites:
+
+```bash
+uv run pytest tests/test_dynamic_worker_architecture.py -q
+uv run pytest tests/test_memory_system.py -q
+```
+
+Browser tests require Playwright + browser runtime and may need network access.
+
+## Known limitations
+
+- Web adapter in `interfaces/web_chat.py` is currently a scaffold (`send_message`/`request_approval` are placeholders), so Telegram and CLI are the most complete interfaces.
+- Startup onboarding gate currently expects both `GOOGLE_API_KEY` and `TELEGRAM_BOT_TOKEN` to be non-empty.
+- `skills/cron/skill.md` references cron tools (`cron_add`, `cron_list`, `cron_remove`) that are not currently provided in `mcp_servers/` in this repo snapshot.
+
+## Contribution guide
+
+When adding features:
+
+1. Keep tool schemas explicit and strict.
+2. Keep risky actions behind HITL checks.
+3. Add or update tests in `tests/`.
+4. Document new tools/skills in this README.
+
+## License
+
+MIT. See `LICENSE`.
