@@ -40,6 +40,10 @@ class SupervisorState(TypedDict):
     # HITL policy directives, e.g. tool names for /permit and deny markers (deny:<tool>)
     approved_tools: list[str]
 
+    # Prevent repeated delegation loops on unresolved objectives within a turn.
+    delegation_attempts: dict[str, int]
+    escalated_objectives: list[str]
+
 
 class WorkerState(TypedDict):
     """
@@ -61,10 +65,6 @@ class WorkerState(TypedDict):
     # REPLACED each turn. Current A11y tree / terminal output / diff.
     observation: str
     
-    # Dynamic tool categories requested by Supervisor delegation.
-    # Example: ["browser"], ["web", "google_workspace"], ["all"]
-    required_tool_categories: list[str]
-
     # JIT skill context fetched once from the Worker objective
     skill_prompts: str
     active_skills: list[str]

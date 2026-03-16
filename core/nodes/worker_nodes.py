@@ -13,6 +13,7 @@ import asyncio
 import logging
 import inspect
 import json
+import time
 from datetime import datetime, timezone
 from typing import Dict, Any
 
@@ -26,7 +27,6 @@ from core.llm import init_agent_llm, is_llm_connection_error
 from mcp_servers import (
     GLOBAL_TOOL_REGISTRY,
     GLOBAL_TOOL_METADATA,
-    GLOBAL_CATEGORY_TOOLS,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,33 +35,6 @@ logger = logging.getLogger(__name__)
 OBSERVATION_SEPARATOR = "\n===OBSERVATION===\n"
 MAX_OBSERVATION_CHARS = 50_000  # ~12,500 tokens
 MAX_SKILL_PROMPT_CHARS = 10_000
-
-
-def _normalize_categories(raw_categories: list[str] | None) -> list[str]:
-    """Normalize Worker categories from state."""
-    categories: list[str] = []
-    for category in raw_categories or []:
-        if isinstance(category, str):
-            value = category.strip().lower()
-            if value and value not in categories:
-                categories.append(value)
-    return categories or ["all"]
-
-
-def _resolve_tool_names(required_categories: list[str] | None) -> set[str]:
-    """Resolve tool names dynamically from loaded plugin category metadata."""
-    categories = _normalize_categories(required_categories)
-
-    if "all" in categories:
-        tool_names = set(GLOBAL_TOOL_REGISTRY.keys())
-    else:
-        tool_names: set[str] = set()
-        for category in categories:
-            tool_names.update(GLOBAL_CATEGORY_TOOLS.get(category, set()))
-
-    # Always keep escalation available as a safe bailout path.
-    tool_names.add("escalate_to_supervisor")
-    return tool_names
 
 
 def _normalize_tool_names(raw_tool_names: list[str] | None) -> list[str]:
@@ -75,64 +48,35 @@ def _normalize_tool_names(raw_tool_names: list[str] | None) -> list[str]:
     return normalized
 
 
-def _resolve_effective_tool_names(
-    required_categories: list[str] | None,
-    active_skill_tools: list[str] | None,
-    *,
-    emit_warnings: bool,
-) -> set[str]:
-    """Resolve final tool set: domain/category scope intersected with skill tool metadata."""
-    category_tool_names = _resolve_tool_names(required_categories)
+def _resolve_skill_tools(active_skill_tools: list[str] | None) -> tuple[list, set[str]]:
+    """Resolve callable tools strictly from matched skill declarations."""
     normalized_skill_tools = _normalize_tool_names(active_skill_tools)
-    if not normalized_skill_tools:
-        return category_tool_names
-
     registry_names = set(GLOBAL_TOOL_REGISTRY.keys())
-    unknown_tools = sorted(name for name in normalized_skill_tools if name not in registry_names)
-    valid_declared_tools = {name for name in normalized_skill_tools if name in registry_names}
-    out_of_scope_tools = sorted(name for name in valid_declared_tools if name not in category_tool_names)
 
-    if unknown_tools and emit_warnings:
+    unknown_tools = sorted(name for name in normalized_skill_tools if name not in registry_names)
+    if unknown_tools:
         logger.warning(
             "WorkerToolBinding: Ignoring unknown skill-declared tools: %s",
             ", ".join(unknown_tools),
         )
 
-    if out_of_scope_tools and emit_warnings:
+    tool_names = {name for name in normalized_skill_tools if name in registry_names}
+    tool_names.add("escalate_to_supervisor")
+
+    if tool_names == {"escalate_to_supervisor"}:
         logger.warning(
-            "WorkerToolBinding: Ignoring out-of-scope skill tools for categories %s: %s",
-            _normalize_categories(required_categories),
-            ", ".join(out_of_scope_tools),
+            "WorkerToolBinding: No executable tools declared by matched skills. "
+            "Worker will escalate for clarification."
         )
 
-    resolved_tools = {name for name in valid_declared_tools if name in category_tool_names}
-    resolved_tools.add("escalate_to_supervisor")
-
-    if resolved_tools == {"escalate_to_supervisor"}:
-        if emit_warnings:
-            logger.warning(
-                "WorkerToolBinding: Skill tool filter left no usable tools. Falling back to category scope."
-            )
-        return category_tool_names
-
-    return resolved_tools
-
-
-def _resolve_worker_tools(
-    required_categories: list[str] | None,
-    active_skill_tools: list[str] | None,
-) -> tuple[list, set[str]]:
-    """Resolve callable tools and their names from dynamic category selection."""
-    tool_names = _resolve_effective_tool_names(
-        required_categories,
-        active_skill_tools,
-        emit_warnings=True,
-    )
     tools = []
     for name in sorted(tool_names):
         func = GLOBAL_TOOL_REGISTRY.get(name)
         if func:
             tools.append(func)
+        elif name == "escalate_to_supervisor":
+            logger.warning("WorkerToolBinding: escalate_to_supervisor is not registered.")
+
     return tools, tool_names
 
 
@@ -217,17 +161,12 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
     observation = state.get("observation", "No environment state available yet.")
     step_count = state.get("step_count", 0)
     max_steps = state.get("max_steps", 15)
-    required_categories = _normalize_categories(state.get("required_tool_categories"))
     active_skill_tools = state.get("active_skill_tools") or []
+    active_skills = state.get("active_skills") or []
     skill_prompts = state.get("skill_prompts", "")
 
-    available_tool_names = sorted(
-        _resolve_effective_tool_names(
-            required_categories,
-            active_skill_tools,
-            emit_warnings=False,
-        )
-    )
+    _, resolved_tool_names = _resolve_skill_tools(active_skill_tools)
+    available_tool_names = sorted(resolved_tool_names)
     tool_preview = ", ".join(available_tool_names[:24])
     if len(available_tool_names) > 24:
         tool_preview += ", ..."
@@ -239,6 +178,13 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
     if "batch_actions" in available_tool_names:
         batch_actions_hint = "- If you need to fill multiple form fields, use the `batch_actions` tool.\n"
 
+    escalation_only_hint = ""
+    if available_tool_names == ["escalate_to_supervisor"]:
+        escalation_only_hint = (
+            "- No executable skills matched this objective. "
+            "Call `escalate_to_supervisor` immediately and request missing context.\n"
+        )
+
     system_prompt = (
         "## System Clock\n"
         f"- Current UTC Time: {now_utc.isoformat()}\n"
@@ -247,9 +193,12 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
         "## Core Identity\n"
         "You are a specialized Worker for EnterpriseClaw. Execute the delegated objective safely and precisely.\n\n"
         f"## Operational Rules & Best Practices\n{skill_prompts}\n\n"
-        "## Allowed Tool Scope\n"
-        f"- Required categories: {', '.join(required_categories)}\n"
+        "## Skill-Bound Tool Scope\n"
+        f"- Active skills: {', '.join(active_skills) if active_skills else 'none'}\n"
         f"- Bound tools ({len(available_tool_names)}): {tool_preview}\n\n"
+        "## Skill Composition Rule\n"
+        "- Treat each `BEGIN SKILL` / `END SKILL` block as an independent SOP.\n"
+        "- Combine skills only when the objective requires a cross-domain handoff.\n\n"
         f"## Your Objective\n{objective}\n\n"
         f"## Progress\n- Step {step_count + 1} of {max_steps}\n\n"
         f"## Current Environment State\n"
@@ -257,6 +206,7 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
         f"## Rules\n"
         f"- Take the NEXT action to accomplish your objective.\n"
         f"{batch_actions_hint}"
+        f"{escalation_only_hint}"
         f"- If you are stuck, confused, or the environment is not responding, "
         f"use `escalate_to_supervisor` immediately instead of looping.\n"
         f"- When the task is complete, respond with a summary of what you accomplished.\n"
@@ -277,6 +227,7 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
     logger.info("🌀 [WORKER TRACE: PROMPT]")
     logger.info(f"🌀 🎯 Objective: {objective}")
     logger.info(f"🌀 📍 Step: {step_count + 1}/{max_steps} | Model: {state.get('active_model') or 'default'}")
+    logger.info(f"🌀 🧩 Active Skills: {state.get('active_skills') or 'None Matched'}")
     logger.info(f"🌀 👁️ Observation: {len(observation)} chars")
     logger.info(f"🌀 📜 History: {len(history)} messages.")
     logger.info("🌀"*80)
@@ -293,7 +244,7 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
 
 async def worker_executor_node(state: WorkerState, config: RunnableConfig) -> Dict[str, Any]:
     """
-    Invoke the LLM with domain-specific tools.
+    Invoke the LLM with skill-bound tools.
     Catches blank generations (local model quirk).
     """
     invoke_messages = state.get("_formatted_prompt")
@@ -301,23 +252,41 @@ async def worker_executor_node(state: WorkerState, config: RunnableConfig) -> Di
         logger.warning("WorkerExecutor: No `_formatted_prompt`. Exiting.")
         return {"status": "failed", "result_summary": "Internal error: no prompt."}
 
-    required_categories = _normalize_categories(state.get("required_tool_categories"))
     active_skill_tools = state.get("active_skill_tools") or []
-    all_tools, resolved_tool_names = _resolve_worker_tools(required_categories, active_skill_tools)
+    all_tools, resolved_tool_names = _resolve_skill_tools(active_skill_tools)
 
     logger.info(
-        "WorkerExecutor: Categories %s, binding %d tools (skill tools=%d).",
-        required_categories,
+        "WorkerExecutor: Binding %d tools (skill tools=%d).",
         len(all_tools),
         len(_normalize_tool_names(active_skill_tools)),
     )
     logger.debug("WorkerExecutor: Bound tools => %s", sorted(resolved_tool_names))
 
+    if resolved_tool_names == {"escalate_to_supervisor"}:
+        reason = (
+            "No executable skills matched the delegated objective. "
+            "Need user clarification or additional skills."
+        )
+        logger.warning("WorkerExecutor: Escalating immediately because no usable skill tools were resolved.")
+        return {
+            "messages": [AIMessage(content=reason)],
+            "status": "escalated",
+            "result_summary": reason,
+            "_retry": False,
+        }
+
     llm = init_agent_llm(state.get("active_model", ""))
     llm_with_tools = llm.bind_tools(all_tools) if all_tools else llm
 
     try:
+        invoke_start = time.perf_counter()
         result = await llm_with_tools.ainvoke(invoke_messages, config=config)
+        invoke_ms = int((time.perf_counter() - invoke_start) * 1000)
+        logger.info(
+            "WorkerExecutor: Model invoke latency=%dms (bound_tools=%d)",
+            invoke_ms,
+            len(all_tools),
+        )
 
         # ── Catch Blank Generations ──
         content = getattr(result, "content", "")

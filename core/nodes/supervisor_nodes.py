@@ -95,6 +95,8 @@ async def supervisor_intent_node(state: SupervisorState) -> Dict[str, Any]:
         "messages": messages_update,
         "tool_failure_count": 0,
         "_retry": False,
+        "delegation_attempts": {},
+        "escalated_objectives": [],
     }
 
 
@@ -138,10 +140,8 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
         "- Use `save_to_long_term_memory` to persist durable user facts and preferences.\n"
         "- Use the System Clock section above for time-sensitive decisions.\n"
         "- Use `web_search` and `web_fetch` for factual lookups.\n"
-        "- Use `delegate_task` for complex multi-step execution via specialized Worker domains.\n"
-        "- Domain `browser`: web navigation, scraping, and form interaction.\n"
-        "- Domain `exec`: shell/code execution and file operations.\n"
-        "- Domain `all`: broad multi-tool reasoning with tight safeguards."
+        "- Use `delegate_task(objective=...)` for complex multi-step execution. "
+        "The Worker will select tools dynamically from matched skills."
     )
     prompt_parts.append(capabilities_prompt)
 
@@ -149,9 +149,10 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
     rules_lines = [
         "## Rules",
         "- You are in LIVE mode and TOOL CALLING IS ENABLED.",
-        "- Delegate complex tasks via `delegate_task` with a focused objective and a single domain.",
-        "- Use only these delegation domains: browser, exec, all.",
-        "- Example: delegate_task(objective='Go to example.com and describe the page', domain='browser').",
+        "- Delegate complex tasks via `delegate_task(objective='...')` with a focused objective.",
+        "- Example: delegate_task(objective='Navigate LinkedIn, find the hiring manager, and email my resume summary').",
+        "- If Worker escalation occurs, do not re-delegate the same unchanged objective.",
+        "- Ask the user for clarification, constraints, or missing context after escalation.",
         "- Never mention delegation mechanics to the user. Return only outcome-focused responses.",
     ]
     prompt_parts.append("\n".join(rules_lines))
@@ -408,8 +409,6 @@ async def supervisor_tools_node(state: SupervisorState, config: RunnableConfig) 
     observation splitting or bloat protection is needed here.
     The delegate_task tool blocks until the Worker finishes.
     """
-    import asyncio
-
     messages = state.get("messages", [])
     if not messages:
         return {}
@@ -419,13 +418,32 @@ async def supervisor_tools_node(state: SupervisorState, config: RunnableConfig) 
         return {}
 
     tool_messages = []
+    delegation_attempts = dict(state.get("delegation_attempts") or {})
+    escalated_objectives = set(state.get("escalated_objectives") or [])
 
     for tool_call in last_message.tool_calls:
         action_name = tool_call["name"]
-        tool_args = tool_call["args"]
+        tool_args = dict(tool_call.get("args") or {})
         call_id = tool_call["id"]
 
         logger.info(f"🛠️ Supervisor executing tool: {action_name}")
+
+        objective_key = ""
+        if action_name == "delegate_task":
+            objective_key = str(tool_args.get("objective", "")).strip()
+
+            if objective_key and objective_key in escalated_objectives:
+                tool_messages.append(ToolMessage(
+                    content=(
+                        "⚠️ Delegation blocked: this objective already escalated in the current turn. "
+                        "Ask the user for clarification or adjust the objective before retrying."
+                    ),
+                    tool_call_id=call_id,
+                ))
+                continue
+
+            if objective_key:
+                delegation_attempts[objective_key] = delegation_attempts.get(objective_key, 0) + 1
 
         func = GLOBAL_TOOL_REGISTRY.get(action_name)
         if not func:
@@ -449,7 +467,12 @@ async def supervisor_tools_node(state: SupervisorState, config: RunnableConfig) 
                 result = func(**tool_args)
                 if inspect.isawaitable(result):
                     result = await result
-            tool_messages.append(ToolMessage(content=str(result), tool_call_id=call_id))
+
+            result_text = str(result)
+            if action_name == "delegate_task" and objective_key and result_text.startswith("⚠️ WORKER ESCALATED:"):
+                escalated_objectives.add(objective_key)
+
+            tool_messages.append(ToolMessage(content=result_text, tool_call_id=call_id))
         except Exception as e:
             logger.error(f"  -> Supervisor tool {action_name} failed: {e}")
             tool_messages.append(ToolMessage(
@@ -457,4 +480,8 @@ async def supervisor_tools_node(state: SupervisorState, config: RunnableConfig) 
                 tool_call_id=call_id,
             ))
 
-    return {"messages": tool_messages}
+    return {
+        "messages": tool_messages,
+        "delegation_attempts": delegation_attempts,
+        "escalated_objectives": sorted(escalated_objectives),
+    }

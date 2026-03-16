@@ -37,7 +37,48 @@ MEMORY_SIMILARITY_THRESHOLD = float(os.getenv("MEMORY_SIMILARITY_THRESHOLD", "0.
 TRIGGER_PATTERN = re.compile(r'### TRIGGER_EXAMPLES(.*?)### END_TRIGGER_EXAMPLES', re.DOTALL)
 NAME_PATTERN = re.compile(r"^name:\s*(.+)$", re.MULTILINE)
 DESC_PATTERN = re.compile(r"^description:\s*(.+)$", re.MULTILINE)
-TOOLS_PATTERN = re.compile(r"^tools:\s*(.+)$", re.MULTILINE)
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for value in values:
+        item = str(value).strip()
+        if item and item not in normalized:
+            normalized.append(item)
+    return normalized
+
+
+def _parse_tools_from_frontmatter(frontmatter: str) -> list[str]:
+    """Parse tools from either inline CSV or YAML list syntax."""
+    lines = frontmatter.splitlines()
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("tools:"):
+            continue
+
+        inline_value = stripped[len("tools:"):].strip()
+        if inline_value:
+            return _dedupe_preserve_order(inline_value.split(","))
+
+        parsed: list[str] = []
+        for follow in lines[i + 1:]:
+            follow_stripped = follow.strip()
+            if not follow_stripped:
+                continue
+            if follow_stripped.startswith("#"):
+                continue
+            if follow_stripped.startswith("- "):
+                parsed.append(follow_stripped[2:].strip())
+                continue
+
+            # End of tools block once we leave list entries.
+            if len(follow) - len(follow.lstrip()) == 0:
+                break
+            break
+
+        return _dedupe_preserve_order(parsed)
+
+    return []
 
 
 def chunked_iterable(iterable, size):
@@ -295,9 +336,6 @@ class ZvecMemoryStore:
                     cached_content = str(cache_entry).strip()
 
                 if cached_content:
-                    prompts.append(f"## {skill_name.replace('_', ' ').title()}\n{cached_content}")
-                    matched_skill_names.append(skill_name)
-
                     normalized_declared_tools: list[str] = []
                     for tool_name in declared_tools_raw:
                         if isinstance(tool_name, str):
@@ -307,6 +345,16 @@ class ZvecMemoryStore:
 
                     if normalized_declared_tools:
                         skill_tools[skill_name] = normalized_declared_tools
+
+                    tools_preview = ", ".join(normalized_declared_tools) if normalized_declared_tools else "None declared"
+                    prompts.append(
+                        f"### Skill Profile: {skill_name.replace('_', ' ').title()}\n"
+                        f"- Declared tools: {tools_preview}\n"
+                        "--- BEGIN SKILL ---\n"
+                        f"{cached_content}\n"
+                        "--- END SKILL ---"
+                    )
+                    matched_skill_names.append(skill_name)
 
             if not prompts:
                 return fallback
@@ -483,10 +531,7 @@ class ZvecMemoryStore:
                     if name_match: name = name_match.group(1).strip()
                     desc_match = DESC_PATTERN.search(frontmatter)
                     if desc_match: description = desc_match.group(1).strip()
-                    tools_match = TOOLS_PATTERN.search(frontmatter)
-                    if tools_match:
-                        raw_tools = [item.strip() for item in tools_match.group(1).split(",")]
-                        declared_tools = [item for item in raw_tools if item]
+                    declared_tools = _parse_tools_from_frontmatter(frontmatter)
 
             # Extract Trigger Examples
             trigger_match = TRIGGER_PATTERN.search(content)
@@ -509,6 +554,7 @@ class ZvecMemoryStore:
                 "content": clean_content,
                 "tools": declared_tools,
             }
+            logger.info("SkillCache: loaded '%s' with %d declared tools.", skill_id, len(declared_tools))
 
         if not skills_to_embed:
             return

@@ -63,7 +63,7 @@ class MemoryRetrieval:
         user_input: str,
     ) -> tuple[str, list[str], dict[str, list[str]]]:
         """Fetch matched skill prompts plus frontmatter tool declarations."""
-        return await self.store.get_relevant_skills_with_metadata(user_input, top_k=2)
+        return await self.store.get_relevant_skills_with_metadata(user_input, top_k=3)
 
     async def get_all_memories(self):
         """Return all active memory items for debugging/admin."""

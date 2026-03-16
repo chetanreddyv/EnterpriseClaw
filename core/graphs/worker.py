@@ -84,9 +84,9 @@ def route_after_worker_error(state: WorkerState) -> str:
 def build_worker_graph():
     """
     Constructs a generic Worker graph.
-    
-    The Worker is parameterized by `required_tool_categories` in its
-    initial state, which determines dynamic tool binding scope.
+
+    The Worker receives only an objective and dynamically binds tools from
+    matched skill frontmatter declarations.
     """
     workflow = StateGraph(WorkerState)
 

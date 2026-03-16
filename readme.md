@@ -92,7 +92,7 @@ flowchart LR
     %% ===== Main User Flow (Thick Lines) =====
     C <==> G
     G <==>|"Chat Flow"| S
-    S ==>|"delegate_task(domain)"| W
+    S ==>|"delegate_task(objective)"| W
     W ==>|"result_summary"| S
 
     %% ===== Execution Loop =====
@@ -101,10 +101,10 @@ flowchart LR
     %% ===== Secondary/Background Flows (Dotted Lines) =====
     T -.->|"HITL Approval Request"| G
     S -.->|"Fetch Context"| M
-    W -.->|"Fetch Domain Rules"| M
+    W -.->|"Fetch Matched Skills"| M
 ```
 
-Key design idea: the Supervisor handles conversation and memory context, while the Worker handles multi-step execution with stricter scope and loop controls.
+Key design idea: the Supervisor handles conversation and memory context, while the Worker handles multi-step execution using objective-matched skills with strict tool binding.
 
 ## Safety model (HITL)
 
@@ -127,19 +127,17 @@ The Supervisor delegates complex work using:
 ```python
 delegate_task(
     objective="Clear task description",
-    domain="browser",   # one of: browser, exec, all
     max_steps=15,
 )
 ```
 
-- `domain=browser`: browser-category tools.
-- `domain=exec`: command execution tools.
-- `domain=all`: all loaded categories.
+The Worker retrieves relevant skills for the objective and binds only the union of tool names declared in those skills' frontmatter. If no executable tools are resolved, it escalates immediately.
 
 Worker safeguards:
 
 - hard step limit,
 - escalation path via `escalate_to_supervisor`,
+- no fallback to broad tool scopes when skill binding is empty,
 - stateful tools executed sequentially,
 - heavy environment observation replaced each turn (prevents prompt bloat).
 

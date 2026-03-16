@@ -81,7 +81,6 @@ async def save_to_long_term_memory(fact: str) -> str:
 @tool
 async def delegate_task(
     objective: str,
-    domain: str,
     max_steps: int = 15,
     active_model: str = "",
     approved_tools: list[str] | None = None,
@@ -98,54 +97,49 @@ async def delegate_task(
     Args:
         objective (str): A clear, specific description of what the Worker should accomplish.
             Example: "Navigate to greenhouse.io and apply for the Software Engineer role."
-        domain (str): Worker execution domain. One of:
-            - "browser": web navigation and form interaction workflows.
-            - "exec": terminal/code execution workflows.
-            - "all": broad multi-tool reasoning workflows.
         max_steps (int): Maximum number of action steps before the Worker gives up. Default 15.
         active_model (str): Internal use only.
         approved_tools (list[str] | None): Internal HITL policy directives inherited from Supervisor.
     """
     from core.graphs.worker import build_worker_graph
 
-    normalized_domain = str(domain or "").strip().lower()
-    domain_to_categories = {
-        "browser": ["browser"],
-        "exec": ["exec"],
-        "all": ["all"],
-    }
+    if max_steps < 1:
+        max_steps = 1
 
-    if normalized_domain not in domain_to_categories:
-        return "Error: `domain` must be one of: browser, exec, all."
-
-    normalized_categories = domain_to_categories[normalized_domain]
+    # LangGraph recursion counts graph traversals, not just worker "steps".
+    # Worker loop can consume ~3 traversals per step (prompt -> executor -> tools),
+    # so provision recursion budget from max_steps to avoid premature aborts.
+    worker_recursion_limit = max(50, (max_steps * 4) + 10)
 
     logger.info(
-        "🚀 Delegating task to Worker [domain=%s, model=%s]: %s",
-        normalized_domain,
+        "🚀 Delegating task to Worker [model=%s, max_steps=%d, recursion_limit=%d]: %s",
         active_model or "default",
+        max_steps,
+        worker_recursion_limit,
         objective,
     )
 
     worker_graph = build_worker_graph()
-    result = await worker_graph.ainvoke({
-        "objective": objective,
-        "required_tool_categories": normalized_categories,
-        "skill_prompts": "",
-        "active_skills": [],
-        "active_skill_tools": [],
-        "max_steps": max_steps,
-        "step_count": 0,
-        "status": "running",
-        "messages": [],
-        "observation": "No environment state yet. Take the first action to observe the environment.",
-        "result_summary": "",
-        "tool_failure_count": 0,
-        "_retry": False,
-        "_formatted_prompt": [],
-        "active_model": active_model,
-        "approved_tools": approved_tools or [],
-    })
+    result = await worker_graph.ainvoke(
+        {
+            "objective": objective,
+            "skill_prompts": "",
+            "active_skills": [],
+            "active_skill_tools": [],
+            "max_steps": max_steps,
+            "step_count": 0,
+            "status": "running",
+            "messages": [],
+            "observation": "No environment state yet. Take the first action to observe the environment.",
+            "result_summary": "",
+            "tool_failure_count": 0,
+            "_retry": False,
+            "_formatted_prompt": [],
+            "active_model": active_model,
+            "approved_tools": approved_tools or [],
+        },
+        config={"recursion_limit": worker_recursion_limit},
+    )
 
     status = result.get("status", "completed")
     summary = result.get("result_summary", "Task completed but no summary was generated.")
