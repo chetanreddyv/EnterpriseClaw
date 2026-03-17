@@ -4,7 +4,6 @@ config/settings.py — Centralized configuration via Pydantic Settings.
 All env vars are loaded from .env and validated at startup.
 """
 
-import os
 import logging
 from dotenv import load_dotenv
 
@@ -34,6 +33,7 @@ class Settings(BaseSettings):
     
     # NEW: LM Studio / OpenAI settings
     openai_api_key: str = Field(default="", description="OpenAI API Key (if using standard OpenAI)")
+    claude_api_key: str = Field(default="", description="Anthropic Claude API key")
     lm_studio_base_url: str = Field(default="http://localhost:1234/v1", description="Local URL for LM Studio")
     lm_studio_api_key: str = Field(default="lm-studio", description="Mock API key for LM Studio")
 

@@ -9,6 +9,7 @@ import httpx
 import logging
 from typing import Optional, Dict, Any
 
+from core.text_utils import chunk_text
 from interfaces.base import ClientInterface
 
 logger = logging.getLogger(__name__)
@@ -86,7 +87,7 @@ class TelegramClient(ClientInterface):
                 raise
 
         # Split long messages
-        chunks = [text[i : i + MAX_LEN] for i in range(0, len(text), MAX_LEN)]
+        chunks = chunk_text(text, MAX_LEN)
         result = None
         for i, chunk in enumerate(chunks):
             kwargs = {"chat_id": chat_id, "text": chunk, "parse_mode": parse_mode}

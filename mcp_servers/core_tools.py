@@ -3,10 +3,9 @@ import logging
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 
-logger = logging.getLogger(__name__)
+from core.constants import OBSERVATION_SEPARATOR
 
-# Separator protocol for splitting tool output into summary + observation
-OBSERVATION_SEPARATOR = "\n===OBSERVATION===\n"
+logger = logging.getLogger(__name__)
 
 @tool
 async def save_to_long_term_memory(fact: str) -> str:

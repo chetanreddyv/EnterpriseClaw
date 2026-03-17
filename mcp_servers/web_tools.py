@@ -15,24 +15,9 @@ from ddgs import DDGS
 import trafilatura
 from langchain_core.tools import tool
 
+from core.text_utils import smart_truncate
+
 logger = logging.getLogger("mcp.web_tools")
-
-# ══════════════════════════════════════════════════════════════
-# Helper Functions
-# ══════════════════════════════════════════════════════════════
-
-def _smart_truncate(text: str, max_chars: int = 15000) -> str:
-    """Truncates text at the nearest paragraph/newline to avoid mid-word chops."""
-    if len(text) <= max_chars:
-        return text
-    
-    truncated = text[:max_chars]
-    last_newline = truncated.rfind('\n')
-    
-    if last_newline > max_chars * 0.8:
-        truncated = truncated[:last_newline]
-        
-    return truncated + "\n\n[TRUNCATED]"
 
 # ══════════════════════════════════════════════════════════════
 # Tool Implementations
@@ -126,7 +111,7 @@ def web_fetch(url: str) -> str:
         if not text_content:
              return "Error: Content could not be parsed or is empty."
 
-        return _smart_truncate(text_content, max_chars=15000).strip()
+        return smart_truncate(text_content, max_chars=15000, suffix="\n\n[TRUNCATED]").strip()
 
     except httpx.TimeoutException:
         logger.error(f"Timeout: {url}")

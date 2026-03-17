@@ -24,6 +24,7 @@ from langchain_core.runnables import RunnableConfig
 
 from core.graphs.states import WorkerState
 from core.llm import init_agent_llm, is_llm_connection_error
+from core.constants import OBSERVATION_SEPARATOR
 from mcp_servers import (
     GLOBAL_TOOL_REGISTRY,
     GLOBAL_TOOL_METADATA,
@@ -32,7 +33,6 @@ from mcp_servers import (
 logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────
-OBSERVATION_SEPARATOR = "\n===OBSERVATION===\n"
 MAX_OBSERVATION_CHARS = 50_000  # ~12,500 tokens
 MAX_SKILL_PROMPT_CHARS = 10_000
 

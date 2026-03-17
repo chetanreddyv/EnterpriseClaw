@@ -22,14 +22,13 @@ from pydantic import Field
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 
+from core.constants import OBSERVATION_SEPARATOR
+from core.text_utils import get_thread_id, smart_truncate
+
 logger = logging.getLogger("mcp.browser_tools")
 
 SCREENSHOT_DIR = Path("./data/screenshots")
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
-
-# Protocol separator for decoupling action summaries from heavy observations.
-# The worker_tools_node splits on this: left → ToolMessage, right → state["observation"]
-OBSERVATION_SEPARATOR = "\n===OBSERVATION===\n"
 
 
 async def _capture_snapshot(config) -> str:
@@ -38,6 +37,18 @@ async def _capture_snapshot(config) -> str:
         return await browser_snapshot.ainvoke({}, config=config)
     except Exception as e:
         return f"(Snapshot capture failed: {e})"
+
+
+def _log_strategy_failure(tool_name: str, strategy: str, selector: str, error: Exception) -> None:
+    """Debug-level visibility for fallback strategy failures."""
+    logger.debug(
+        "%s fallback failed [%s] selector='%s': %s: %s",
+        tool_name,
+        strategy,
+        selector,
+        type(error).__name__,
+        error,
+    )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -172,20 +183,8 @@ class BrowserSessionManager:
         except asyncio.CancelledError:
             pass
 
-
-def _smart_truncate(text: str, max_chars: int = 12000) -> str:
-    """Truncate text at the nearest newline boundary."""
-    if len(text) <= max_chars:
-        return text
-    truncated = text[:max_chars]
-    last_nl = truncated.rfind("\n")
-    if last_nl > max_chars * 0.8:
-        truncated = truncated[:last_nl]
-    return truncated + "\n\n... [Content truncated]"
-
-
 def _get_thread_id(config) -> str:
-    return config.get("configurable", {}).get("thread_id", "default") if config else "default"
+    return get_thread_id(config, default="default")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -207,7 +206,7 @@ async def browser_navigate(
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         title = await page.title()
         text_content = await page.inner_text("body")
-        text_content = _smart_truncate(text_content)
+        text_content = smart_truncate(text_content, max_chars=12000)
         return f"## Page Loaded: {title}\n**URL**: {url}\n\n{text_content}"
     except Exception as e:
         logger.error(f"❌ browser_navigate failed: {e}")
@@ -226,7 +225,7 @@ async def browser_get_text(
             return "No page is currently loaded. Use browser_navigate first."
         title = await page.title()
         text_content = await page.inner_text("body")
-        text_content = _smart_truncate(text_content)
+        text_content = smart_truncate(text_content, max_chars=12000)
         return f"## Current Page: {title}\n**URL**: {page.url}\n\n{text_content}"
     except Exception as e:
         return f"Failed to extract text: {type(e).__name__} - {str(e)}"
@@ -370,7 +369,7 @@ async def browser_snapshot(
         if not tree_text:
             return "No interactive elements found on this page. Try browser_get_text instead."
 
-        tree_text = _smart_truncate(tree_text)
+        tree_text = smart_truncate(tree_text, max_chars=12000)
         title = await page.title()
         return f"## Interactive Elements: {title}\n**URL**: {page.url}\n\n```\n{tree_text}\n```"
     except Exception as e:
@@ -398,7 +397,7 @@ async def browser_tab_management(
                 marker = "→ " if i == entry["active_page_idx"] else "  "
                 try:
                     title = await p.title()
-                except:
+                except Exception:
                     title = "(closed)"
                 lines.append(f"{marker}[{i}] {title} — {p.url}")
             return "## Open Tabs\n" + "\n".join(lines)
@@ -463,35 +462,37 @@ async def browser_click(
 
         summary = None
 
-        # Strategy 1: CSS selector
-        try:
+        async def _click_css() -> str:
             await page.click(selector, **click_kwargs)
             await page.wait_for_load_state("domcontentloaded", timeout=10000)
-            summary = f"✅ Clicked `{selector}`. Page: **{await page.title()}** ({page.url})"
-        except Exception:
-            pass
+            return f"✅ Clicked `{selector}`. Page: **{await page.title()}** ({page.url})"
 
-        # Strategy 2: Visible text
-        if not summary:
+        async def _click_text() -> str:
+            locator = page.get_by_text(selector, exact=False).first
+            await locator.click(**click_kwargs)
+            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            return f"✅ Clicked text '{selector}'. Page: **{await page.title()}** ({page.url})"
+
+        async def _click_role(role: str) -> str:
+            locator = page.get_by_role(role, name=selector).first
+            await locator.click(**click_kwargs)
+            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            return f"✅ Clicked {role} '{selector}'. Page: **{await page.title()}** ({page.url})"
+
+        strategies = [
+            ("css", _click_css),
+            ("text", _click_text),
+            ("role:link", lambda: _click_role("link")),
+            ("role:button", lambda: _click_role("button")),
+            ("role:menuitem", lambda: _click_role("menuitem")),
+        ]
+
+        for strategy_name, strategy in strategies:
             try:
-                locator = page.get_by_text(selector, exact=False).first
-                await locator.click(**click_kwargs)
-                await page.wait_for_load_state("domcontentloaded", timeout=10000)
-                summary = f"✅ Clicked text '{selector}'. Page: **{await page.title()}** ({page.url})"
-            except Exception:
-                pass
-
-        # Strategy 3: Role-based
-        if not summary:
-            for role in ["link", "button", "menuitem"]:
-                try:
-                    locator = page.get_by_role(role, name=selector).first
-                    await locator.click(**click_kwargs)
-                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
-                    summary = f"✅ Clicked {role} '{selector}'. Page: **{await page.title()}** ({page.url})"
-                    break
-                except Exception:
-                    continue
+                summary = await strategy()
+                break
+            except Exception as e:
+                _log_strategy_failure("browser_click", strategy_name, selector, e)
 
         if not summary:
             return f"❌ Could not find element matching '{selector}'. Try browser_snapshot to inspect the page."
@@ -525,31 +526,19 @@ async def browser_type(
             return "No page is currently loaded. Use browser_navigate first."
 
         filled = False
+        strategies = [
+            ("css", lambda: page.fill(selector, text, timeout=5000)),
+            ("placeholder", lambda: page.get_by_placeholder(selector, exact=False).first.fill(text, timeout=5000)),
+            ("label", lambda: page.get_by_label(selector, exact=False).first.fill(text, timeout=5000)),
+        ]
 
-        # Try CSS selector
-        try:
-            await page.fill(selector, text, timeout=5000)
-            filled = True
-        except Exception:
-            pass
-
-        # Fallback: placeholder
-        if not filled:
+        for strategy_name, strategy in strategies:
             try:
-                locator = page.get_by_placeholder(selector, exact=False).first
-                await locator.fill(text, timeout=5000)
+                await strategy()
                 filled = True
-            except Exception:
-                pass
-
-        # Fallback: label
-        if not filled:
-            try:
-                locator = page.get_by_label(selector, exact=False).first
-                await locator.fill(text, timeout=5000)
-                filled = True
-            except Exception:
-                pass
+                break
+            except Exception as e:
+                _log_strategy_failure("browser_type", strategy_name, selector, e)
 
         if not filled:
             return f"❌ Could not find input matching '{selector}'. Try browser_snapshot to inspect the page."
@@ -607,20 +596,26 @@ async def browser_select_option(
             return "No page is currently loaded. Use browser_navigate first."
 
         summary = None
+        strategies = [
+            (
+                "label",
+                lambda: page.select_option(selector, label=value, timeout=5000),
+                f"✅ Selected '{value}' from `{selector}`.",
+            ),
+            (
+                "value",
+                lambda: page.select_option(selector, value=value, timeout=5000),
+                f"✅ Selected value='{value}' from `{selector}`.",
+            ),
+        ]
 
-        # Try by label (visible text) first, then by value attribute
-        try:
-            await page.select_option(selector, label=value, timeout=5000)
-            summary = f"✅ Selected '{value}' from `{selector}`."
-        except Exception:
-            pass
-
-        if not summary:
+        for strategy_name, strategy, strategy_summary in strategies:
             try:
-                await page.select_option(selector, value=value, timeout=5000)
-                summary = f"✅ Selected value='{value}' from `{selector}`."
-            except Exception:
-                pass
+                await strategy()
+                summary = strategy_summary
+                break
+            except Exception as e:
+                _log_strategy_failure("browser_select_option", strategy_name, selector, e)
 
         if not summary:
             return f"❌ Could not select '{value}' in `{selector}`. Verify the selector and available options."
@@ -678,22 +673,26 @@ async def browser_hover(
             return "No page is currently loaded. Use browser_navigate first."
 
         summary = None
+        strategies = [
+            (
+                "css",
+                lambda: page.hover(selector, timeout=5000),
+                f"✅ Hovering over `{selector}`.",
+            ),
+            (
+                "text",
+                lambda: page.get_by_text(selector, exact=False).first.hover(timeout=5000),
+                f"✅ Hovering over text '{selector}'.",
+            ),
+        ]
 
-        # Try CSS selector
-        try:
-            await page.hover(selector, timeout=5000)
-            summary = f"✅ Hovering over `{selector}`."
-        except Exception:
-            pass
-
-        # Try text matching
-        if not summary:
+        for strategy_name, strategy, strategy_summary in strategies:
             try:
-                locator = page.get_by_text(selector, exact=False).first
-                await locator.hover(timeout=5000)
-                summary = f"✅ Hovering over text '{selector}'."
-            except Exception:
-                pass
+                await strategy()
+                summary = strategy_summary
+                break
+            except Exception as e:
+                _log_strategy_failure("browser_hover", strategy_name, selector, e)
 
         if not summary:
             return f"❌ Could not find element matching '{selector}'. Try browser_snapshot to inspect the page."

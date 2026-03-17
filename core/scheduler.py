@@ -183,7 +183,13 @@ class SystemScheduler:
                     try:
                         from zoneinfo import ZoneInfo
                         now_local = datetime.now(ZoneInfo(job.schedule_tz))
-                    except Exception:
+                    except Exception as e:
+                        logger.warning(
+                            "SchedulerService: Invalid timezone '%s' for job %s; falling back to UTC (%s)",
+                            job.schedule_tz,
+                            job.id,
+                            e,
+                        )
                         now_local = datetime.now(timezone.utc)
                 else:
                     now_local = datetime.now(timezone.utc)

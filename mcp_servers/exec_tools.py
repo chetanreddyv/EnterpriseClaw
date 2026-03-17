@@ -5,6 +5,8 @@ from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 import httpx
 
+from core.text_utils import get_thread_id
+
 logger = logging.getLogger(__name__)
 
 async def _monitor_background_process(process, command: str, thread_id: str, platform: str):
@@ -54,7 +56,7 @@ async def exec_command(
     Returns the standard output and standard error.
     """
     
-    thread_id = config.get("configurable", {}).get("thread_id") if config else None
+    thread_id = get_thread_id(config, default="")
     platform = config.get("configurable", {}).get("platform", "telegram") if config else "telegram"
     
     # --- FIRE AND FORGET MODE (NOW WITH MONITORING) ---
