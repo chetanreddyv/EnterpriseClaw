@@ -13,6 +13,7 @@ from typing import Dict, Any
 from pathlib import Path
 from datetime import datetime, timezone
 
+from langgraph.errors import GraphBubbleUp
 from langchain_core.messages import (
     SystemMessage, HumanMessage, AIMessage, ToolMessage,
     RemoveMessage, trim_messages,
@@ -140,6 +141,7 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
         "- Use `save_to_long_term_memory` to persist durable user facts and preferences.\n"
         "- Use the System Clock section above for time-sensitive decisions.\n"
         "- Use `web_search` and `web_fetch` for factual lookups.\n"
+        f"- Exact supervisor tools: {', '.join(sorted(SUPERVISOR_TOOLS))}.\n"
         "- Use `delegate_task(objective=...)` for complex multi-step execution. "
         "The Worker will select tools dynamically from matched skills."
     )
@@ -153,6 +155,7 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
         "- Example: delegate_task(objective='Navigate LinkedIn, find the hiring manager, and email my resume summary').",
         "- If Worker escalation occurs, do not re-delegate the same unchanged objective.",
         "- Ask the user for clarification, constraints, or missing context after escalation.",
+        "- Never invent tool names. Use only the exact supervisor tools listed above.",
         "- Never mention delegation mechanics to the user. Return only outcome-focused responses.",
     ]
     prompt_parts.append("\n".join(rules_lines))
@@ -473,6 +476,9 @@ async def supervisor_tools_node(state: SupervisorState, config: RunnableConfig) 
                 escalated_objectives.add(objective_key)
 
             tool_messages.append(ToolMessage(content=result_text, tool_call_id=call_id))
+        except GraphBubbleUp:
+            logger.info("Supervisor tool %s raised GraphBubbleUp; propagating for HITL flow.", action_name)
+            raise
         except Exception as e:
             logger.error(f"  -> Supervisor tool {action_name} failed: {e}")
             tool_messages.append(ToolMessage(

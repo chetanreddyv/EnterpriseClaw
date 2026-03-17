@@ -6,7 +6,7 @@ The Worker's messages are a lightweight action ledger; heavy environment
 state lives only in `observation`, which is REPLACED (not appended) each turn.
 """
 
-from typing import Annotated, TypedDict
+from typing import Annotated, TypedDict, NotRequired
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
@@ -90,3 +90,7 @@ class WorkerState(TypedDict):
     
     # HITL policy directives inherited from Supervisor
     approved_tools: list[str]
+
+    # Execution context metadata (e.g., interactive vs cron job)
+    execution_mode: NotRequired[str]     # "interactive" | "cron"
+    execution_source: NotRequired[str]   # free-form source identifier for logging/debug

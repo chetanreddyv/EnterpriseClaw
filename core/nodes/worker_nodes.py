@@ -108,6 +108,22 @@ async def worker_skill_context_node(state: WorkerState) -> Dict[str, Any]:
     objective = state.get("objective", "").strip()
     fallback = "You are a specialized task executor. Proceed safely and verify actions before execution."
 
+    # If scheduler pre-resolved skills/tools, keep those bindings deterministic.
+    prebound_skill_tools = _normalize_tool_names(state.get("active_skill_tools") or [])
+    prebound_skill_prompts = state.get("skill_prompts", "")
+    prebound_skills = [s for s in (state.get("active_skills") or []) if isinstance(s, str) and s.strip()]
+    if prebound_skill_tools:
+        logger.info(
+            "WorkerSkillContext: using prebound skills/tools from execution context (skills=%s, tools=%s)",
+            prebound_skills,
+            prebound_skill_tools,
+        )
+        return {
+            "skill_prompts": prebound_skill_prompts or fallback,
+            "active_skills": prebound_skills,
+            "active_skill_tools": prebound_skill_tools,
+        }
+
     if not objective:
         return {"skill_prompts": fallback, "active_skills": [], "active_skill_tools": []}
 
@@ -207,6 +223,8 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
         f"- Take the NEXT action to accomplish your objective.\n"
         f"{batch_actions_hint}"
         f"{escalation_only_hint}"
+        f"- Never invent tool names. Use only the exact tool names listed in `Bound tools` above.\n"
+        f"- If the exact tool you want is unavailable, use `escalate_to_supervisor` instead of guessing.\n"
         f"- If you are stuck, confused, or the environment is not responding, "
         f"use `escalate_to_supervisor` immediately instead of looping.\n"
         f"- When the task is complete, respond with a summary of what you accomplished.\n"
@@ -401,6 +419,28 @@ def _split_observation(raw_output: str, tool_name: str) -> tuple[str, str | None
         return raw_output, None
 
 
+def _execution_mode(state: WorkerState, config: RunnableConfig) -> str:
+    """Resolve execution mode from state/config. Defaults to interactive."""
+    state_mode = str(state.get("execution_mode") or "").strip().lower()
+    if state_mode in {"interactive", "cron"}:
+        return state_mode
+
+    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+    config_mode = str(configurable.get("execution_mode") or "").strip().lower()
+    if config_mode in {"interactive", "cron"}:
+        return config_mode
+
+    return "interactive"
+
+
+def _cron_auto_approved_tools(state: WorkerState) -> set[str]:
+    """Tools that cron runs may auto-approve: only skill-declared tools."""
+    declared = set(_normalize_tool_names(state.get("active_skill_tools") or []))
+    # Escalation sentinel should always stay callable.
+    declared.add("escalate_to_supervisor")
+    return declared
+
+
 async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[str, Any]:
     """
     Execute tool calls with metadata-aware strategy:
@@ -424,7 +464,17 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
     if not getattr(last_message, "tool_calls", []):
         return {}
 
+    execution_mode = _execution_mode(state, config)
+    is_cron_mode = execution_mode == "cron"
+
     approved_tools = set(state.get("approved_tools") or [])
+    if is_cron_mode:
+        approved_tools.update(_cron_auto_approved_tools(state))
+        logger.info(
+            "WorkerHITL: cron mode detected; auto-approved %d skill-declared tools.",
+            len(approved_tools),
+        )
+
     tool_messages = []
     latest_observation = None  # Will hold the LAST observation (replaces, not appends)
     tool_calls = list(last_message.tool_calls)
@@ -448,12 +498,42 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
 
     if run_sequential:
         # SEQUENTIAL: Execute in exact LLM-specified order. Halt on first failure.
-        for tool_call in tool_calls:
+        for idx, tool_call in enumerate(tool_calls):
             action_name = tool_call["name"]
             call_id = tool_call["id"]
 
+            if action_name not in GLOBAL_TOOL_REGISTRY:
+                tool_messages.append(ToolMessage(
+                    content=f"Error: Tool '{action_name}' not found in registry.",
+                    tool_call_id=call_id,
+                ))
+                for remaining in tool_calls[idx + 1:]:
+                    tool_messages.append(ToolMessage(
+                        content=f"Skipped: previous action '{action_name}' failed.",
+                        tool_call_id=remaining["id"],
+                    ))
+                break
+
             # ── HITL TIERED APPROVAL ──
             if requires_approval(action_name, approved_tools):
+                if is_cron_mode:
+                    tool_messages.append(ToolMessage(
+                        content=(
+                            f"❌ Rejected in cron mode: '{action_name}' requires interactive approval "
+                            "and was not declared by the bound skill set for this job."
+                        ),
+                        tool_call_id=call_id,
+                    ))
+                    # Halt remaining tools after deterministic cron rejection.
+                    for remaining in tool_calls[idx + 1:]:
+                        tool_messages.append(ToolMessage(
+                            content=(
+                                f"Skipped: previous action '{action_name}' was rejected by cron policy."
+                            ),
+                            tool_call_id=remaining["id"],
+                        ))
+                    break
+
                 decision = request_tool_approval(action_name, tool_call["args"])
                 if decision != "approve":
                     tool_messages.append(ToolMessage(
@@ -461,7 +541,6 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
                         tool_call_id=call_id,
                     ))
                     # Halt remaining tools after rejection
-                    idx = tool_calls.index(tool_call)
                     for remaining in tool_calls[idx + 1:]:
                         tool_messages.append(ToolMessage(
                             content=f"Skipped: previous action '{action_name}' was rejected.",
@@ -477,7 +556,6 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
             if isinstance(result_content, str) and result_content.startswith("Error"):
                 tool_messages.append(ToolMessage(content=result_content, tool_call_id=call_id))
                 # Halt: skip remaining tools
-                idx = tool_calls.index(tool_call)
                 for remaining in tool_calls[idx + 1:]:
                     tool_messages.append(ToolMessage(
                         content=f"Skipped: previous action '{action_name}' failed.",
@@ -496,23 +574,47 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
     else:
         # CONCURRENT: Read-only tools can run in parallel
         # First, check HITL for any tool that requires approval (rare in read-only domain)
+        executable_tool_calls = []
         for tool_call in tool_calls:
-            if requires_approval(tool_call["name"], approved_tools):
-                decision = request_tool_approval(tool_call["name"], tool_call["args"])
+            action_name = tool_call["name"]
+
+            if action_name not in GLOBAL_TOOL_REGISTRY:
+                tool_messages.append(ToolMessage(
+                    content=f"Error: Tool '{action_name}' not found in registry.",
+                    tool_call_id=tool_call["id"],
+                ))
+                continue
+
+            if requires_approval(action_name, approved_tools):
+                if is_cron_mode:
+                    tool_messages.append(ToolMessage(
+                        content=(
+                            f"❌ Rejected in cron mode: '{action_name}' requires interactive approval "
+                            "and was not declared by the bound skill set for this job."
+                        ),
+                        tool_call_id=tool_call["id"],
+                    ))
+                    continue
+
+                decision = request_tool_approval(action_name, tool_call["args"])
                 if decision != "approve":
                     tool_messages.append(ToolMessage(
-                        content=f"❌ Rejected by user: {tool_call['name']}.",
+                        content=f"❌ Rejected by user: {action_name}.",
                         tool_call_id=tool_call["id"],
                     ))
                     return {"messages": tool_messages}
+            executable_tool_calls.append(tool_call)
+
+        if not executable_tool_calls:
+            return {"messages": tool_messages}
 
         tasks = [
             _execute_single_tool(tc["name"], tc["args"], config)
-            for tc in tool_calls
+            for tc in executable_tool_calls
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for tool_call, result_content in zip(tool_calls, results):
+        for tool_call, result_content in zip(executable_tool_calls, results):
             call_id = tool_call["id"]
 
             if isinstance(result_content, Exception):

@@ -23,7 +23,6 @@ DENY_PREFIX = "deny:"
 # Tier 1: AUTONOMOUS — no approval ever needed (safe, read-only)
 AUTONOMOUS_TOOLS = {
     "web_search", "web_fetch",
-    "schedule_reminder",
     "save_to_long_term_memory",
     "browser_get_text", "browser_screenshot", "browser_snapshot",
     "browser_go_back", "browser_scroll", "browser_wait_for",

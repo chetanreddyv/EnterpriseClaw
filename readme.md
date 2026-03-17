@@ -293,7 +293,8 @@ Important persisted artifacts under `data/`:
 - `zvec_skills/`: skill vector index.
 - `screenshots/`: browser tool screenshot output.
 - `browser_profile/`: persistent browser session/profile data.
-- `reminders.json`: scheduled reminder data.
+- `cron/jobs.json`: scheduler job definitions.
+- `cron/runs/*.jsonl`: per-job run history.
 
 ## Docker deployment
 

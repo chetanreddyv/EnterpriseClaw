@@ -1,48 +1,12 @@
 import json
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 
 logger = logging.getLogger(__name__)
 
-REMINDERS_FILE = Path("data/reminders.json")
-
 # Separator protocol for splitting tool output into summary + observation
 OBSERVATION_SEPARATOR = "\n===OBSERVATION===\n"
-
-@tool
-def schedule_reminder(message: str, time_str: str) -> str:
-    """
-    Schedule a reminder or future task. The heartbeat system will check this schedule
-    every 15 minutes and inject the message back into the conversation context.
-    
-    Args:
-        message (str): The reminder text (e.g. "Check the stock price of AAPL", "Reply to Bob's email")
-        time_str (str): When you want to be reminded. You can use ISO format (2025-10-15T14:30:00Z) or plain English (e.g., "in 30 mins", "tomorrow at 9am").
-    """
-    try:
-        REMINDERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        reminders = []
-        if REMINDERS_FILE.exists():
-            with open(REMINDERS_FILE, "r") as f:
-                reminders = json.load(f)
-                
-        reminders.append({
-            "message": message,
-            "target_time": time_str,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "status": "pending"
-        })
-        
-        with open(REMINDERS_FILE, "w") as f:
-            json.dump(reminders, f, indent=2)
-            
-        return f"Successfully scheduled reminder '{message}' for '{time_str}'."
-    except Exception as e:
-        logger.error(f"Failed to schedule reminder: {e}")
-        return f"Failed to schedule reminder: {e}"
 
 @tool
 async def save_to_long_term_memory(fact: str) -> str:
@@ -253,12 +217,183 @@ async def batch_actions(actions: list, config: RunnableConfig = None) -> str:
     return f"{summary}{OBSERVATION_SEPARATOR}{snapshot}"
 
 
+# ═══════════════════════════════════════════════════════════════
+# Scheduler Tools (System-Level Scheduling / Nanobot Approach)
+# ═══════════════════════════════════════════════════════════════
+
+@tool
+async def schedule_background_task(
+    objective: str,
+    schedule_type: str,
+    schedule_value: str,
+    deliver_mode: str = "silent",
+    target: str = "isolated",
+    timezone: str = None,
+    skill_name: str = None,
+) -> str:
+    """
+    Schedule a background task to run on a specific schedule.
+    
+    The system scheduler will execute this task in an isolated environment
+    at the specified time(s). You do NOT need to manage the clock—the backend does.
+    
+    Args:
+        objective (str): What the agent should do (e.g., "Search for new job postings in Python")
+        schedule_type (str): One of "cron" (e.g., "0 9 * * *"), "every" (milliseconds), or "at" (timestamp)
+        schedule_value (str): The schedule expression
+            - For "cron": Standard cron expression (e.g., "0 9 * * 1-5" = 9am weekdays)
+            - For "every": Milliseconds as string (e.g., "900000" = 15 minutes)
+            - For "at": Unix timestamp in milliseconds or ISO 8601 timestamp
+        deliver_mode (str): "silent" (don't notify) or "announce" (send result to user)
+        target (str): "isolated" (run separately, default), "main" (run in user session), or "session:<id>"
+        timezone (str): Timezone for cron expressions (e.g., "America/New_York")
+        skill_name (str): Optional skill to activate explicitly (e.g., "job-finder", "browser-use").
+            Use this when you know which skill the task needs. Bypasses semantic search for
+            more reliable tool binding.
+    
+    Returns:
+        str: Job ID if successful, error message otherwise
+    """
+    try:
+        from core.scheduler import get_scheduler
+        
+        scheduler = await get_scheduler()
+        
+        # Generate a descriptive job name
+        name = f"Background Task: {objective[:50]}"
+        
+        job_id = scheduler.add_job(
+            name=name,
+            objective=objective,
+            schedule_type=schedule_type,
+            schedule_value=schedule_value,
+            deliver_mode=deliver_mode,
+            target=target,
+            tz=timezone,
+            skill_name=skill_name,
+        )
+        
+        return f"✅ Scheduled task (ID: {job_id}). Will execute on schedule: {schedule_type}={schedule_value}"
+    except Exception as e:
+        logger.error(f"schedule_background_task failed: {e}")
+        return f"❌ Failed to schedule task: {str(e)}"
+
+
+@tool
+async def send_user_notification(message: str, channel: str = "telegram", thread_id: str = None) -> str:
+    """
+    Send a notification to the user from a background task.
+    
+    Use this when a scheduled job needs to notify the user of results.
+    The message will be delivered asynchronously via the specified channel.
+    
+    Args:
+        message (str): The message to send to the user
+        channel (str): "telegram", "web", or "all"
+        thread_id (str): Specific thread/conversation ID (optional; uses last known thread if not specified)
+    
+    Returns:
+        str: Confirmation or error message
+    """
+    try:
+        from core.channel_manager import channel_manager
+        
+        if not thread_id:
+            # Default to a system thread or the user's last known thread
+            thread_id = "system_notification"
+        
+        await channel_manager.send_message(
+            platform=channel,
+            thread_id=thread_id,
+            content=f"📬 Background Task Update:\n{message}",
+        )
+        
+        return f"✅ Notification sent to {channel}"
+    except Exception as e:
+        logger.error(f"send_user_notification failed: {e}")
+        return f"❌ Failed to send notification: {str(e)}"
+
+
+@tool
+async def list_scheduled_tasks() -> str:
+    """
+    View all currently scheduled background tasks.
+    
+    Returns a summary of all active and pending tasks with their schedules and next run times.
+    """
+    try:
+        from core.scheduler import get_scheduler
+        import json
+        
+        scheduler = await get_scheduler()
+        jobs = scheduler.list_jobs()
+        
+        if not jobs:
+            return "No scheduled tasks currently."
+        
+        lines = []
+        for job in jobs:
+            job_id = job.get("id")
+            name = job.get("name")
+            enabled = job.get("enabled", True)
+            schedule = job.get("schedule", {})
+            state = job.get("state", {})
+            
+            status = "✅ Active" if enabled else "⏸️ Paused"
+            next_run = state.get("nextRunAtMs")
+            
+            next_run_str = ""
+            if next_run:
+                from datetime import datetime, timezone
+                next_dt = datetime.fromtimestamp(next_run / 1000, tz=timezone.utc)
+                next_run_str = f" | Next: {next_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+            
+            schedule_kind = schedule.get("kind", "unknown")
+            schedule_expr = schedule.get("expr") or schedule.get("everyMs") or schedule.get("atMs", "N/A")
+            
+            lines.append(f"- `{job_id}` [{status}] {name}\n  Schedule: {schedule_kind}={schedule_expr}{next_run_str}")
+        
+        return "📅 **Scheduled Tasks:**\n" + "\n".join(lines)
+    except Exception as e:
+        logger.error(f"list_scheduled_tasks failed: {e}")
+        return f"❌ Failed to list tasks: {str(e)}"
+
+
+@tool
+async def cancel_task(job_id: str) -> str:
+    """
+    Cancel and remove a scheduled background task.
+    
+    Args:
+        job_id (str): The ID of the task to cancel (from list_scheduled_tasks)
+    
+    Returns:
+        str: Confirmation or error message
+    """
+    try:
+        from core.scheduler import get_scheduler
+        
+        scheduler = await get_scheduler()
+        success = scheduler.cancel_job(job_id)
+        
+        if success:
+            return f"✅ Task {job_id} has been cancelled and removed."
+        else:
+            return f"❌ Task {job_id} not found."
+    except Exception as e:
+        logger.error(f"cancel_task failed: {e}")
+        return f"❌ Failed to cancel task: {str(e)}"
+
+
 # Register tools so they are dynamically loaded by the GLOBAL_TOOL_REGISTRY in __init__.py
 TOOL_REGISTRY = {
-    "schedule_reminder": schedule_reminder,
     "save_to_long_term_memory": save_to_long_term_memory,
     "delegate_task": delegate_task,
     "escalate_to_supervisor": escalate_to_supervisor,
     "batch_actions": batch_actions,
+    "schedule_background_task": schedule_background_task,
+    "send_user_notification": send_user_notification,
+    "list_scheduled_tasks": list_scheduled_tasks,
+    "cancel_task": cancel_task,
 }
 

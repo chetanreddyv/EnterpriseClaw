@@ -81,12 +81,17 @@ def route_after_worker_error(state: WorkerState) -> str:
     return "prompt_builder"
 
 
-def build_worker_graph():
+def build_worker_graph(checkpointer=None):
     """
     Constructs a generic Worker graph.
 
     The Worker receives only an objective and dynamically binds tools from
     matched skill frontmatter declarations.
+    
+    Args:
+        checkpointer: Optional LangGraph checkpointer. When provided (e.g. for
+            cron sessions), the Worker accumulates history across runs in the
+            same thread_id, enabling stateful background tasks.
     """
     workflow = StateGraph(WorkerState)
 
@@ -129,4 +134,4 @@ def build_worker_graph():
     # Summarize always ends
     workflow.add_edge("summarize", END)
 
-    return workflow.compile()
+    return workflow.compile(checkpointer=checkpointer)

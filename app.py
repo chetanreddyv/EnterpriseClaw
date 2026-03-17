@@ -184,9 +184,10 @@ async def lifespan(app: FastAPI):
         graph = build_supervisor_graph(checkpointer=checkpointer)
         logger.info("✅ Supervisor-Worker graph compiled with SQLite checkpointer")
 
-        # Start Heartbeat Daemon
-        heartbeat_task = asyncio.create_task(system_heartbeat())
-        logger.info("💓 System Heartbeat loop started")
+        # Initialize System Scheduler (Nanobot-style background task execution)
+        from core.scheduler import initialize_scheduler, shutdown_scheduler
+        await initialize_scheduler(checkpointer=checkpointer)
+        logger.info("💓 System Scheduler initialized (manages background tasks and heartbeat)")
 
         # Delete any existing webhook and start polling for local dev
         await telegram_client.delete_webhook()
@@ -200,8 +201,9 @@ async def lifespan(app: FastAPI):
 
         # Shutdown
         logger.info("🔴 Shutting down...")
-        heartbeat_task.cancel()
         polling_task.cancel()
+        await shutdown_scheduler()
+        logger.info("✅ System Scheduler shut down")
         await telegram_client.close()
         try:
             from mcp_servers.browser_tools import BrowserSessionManager
@@ -218,40 +220,6 @@ async def lifespan(app: FastAPI):
             
     # SQLite connection is closed automatically when the async with block exits
     logger.info("✅ SQLite checkpointer closed")
-
-
-
-async def system_heartbeat():
-    """
-    Background pulse: Wakes up the agent every 15 minutes to perform any time-based tasks.
-    It checks for reminders or scheduled tasks via its internal tools.
-    """
-    pulse_delay = 900  # 15 minutes
-    logger.info(f"💓 Heartbeat daemon initialized. Pulse every {pulse_delay}s.")
-    
-    # Wait initially to allow startup to finish
-    await asyncio.sleep(10)
-    
-    while True:
-        try:
-            await asyncio.sleep(pulse_delay)
-            logger.info("💓 Sending System Heartbeat to Agent...")
-            
-            # The system thread ID
-            thread_id = "system_cron_thread"
-            
-            # Inject a silent trigger into the graph using direct_agent_invoke
-            await direct_agent_invoke(
-                chat_id=thread_id,
-                text="[SYSTEM EVENT: HEARTBEAT. Check your schedule, read unread emails, and perform any necessary background tasks. If nothing needs doing, reply 'IDLE'.]",
-                platform="system"
-            )
-
-        except asyncio.CancelledError:
-            logger.info("💓 Heartbeat daemon stopped")
-            break
-        except Exception as e:
-            logger.error(f"💓 Heartbeat error: {e}", exc_info=True)
 
 
 # ==========================================================
@@ -310,6 +278,18 @@ async def direct_agent_invoke(chat_id: str, text: str, platform: str, user_name:
         if state.next:
             interrupted = state.tasks[0].interrupts[0].value
             tool_args = interrupted.get("tool_args", {})
+
+            if platform == "system":
+                logger.warning(
+                    "HITL interrupt occurred in system context for action '%s'; "
+                    "system runs cannot request interactive approval.",
+                    interrupted.get("action", "unknown"),
+                )
+                return {
+                    "approval_required": False,
+                    "error": "System run requested interactive approval. Scheduler policy should avoid this path.",
+                    "action": interrupted.get("action", "unknown"),
+                }
             
             # Request explicit HITL approval for dangerous tools
             await channel_manager.request_approval(
@@ -327,15 +307,13 @@ async def direct_agent_invoke(chat_id: str, text: str, platform: str, user_name:
         else:
             response = extract_response(state.values)
 
-            # Prevent chatbot spam for background/internal silent responses
-            if platform != "system" and response.strip() != "HEARTBEAT_OK" and response != "Done!" and response != "IDLE":
+            # Send response to user (unless running in silent background mode)
+            if platform != "system":
                 await channel_manager.send_message(
                     platform=platform,
                     thread_id=str(chat_id),
                     content=response
                 )
-            elif response.strip() == "HEARTBEAT_OK" or response == "IDLE":
-                pass
 
             # 1. Fast History Write ONLY. Semantic extraction is now governed directly by the agent via `@tool`.
             
@@ -389,6 +367,18 @@ async def direct_resume_invoke(chat_id: str, decision: str, platform: str) -> di
         else:
             interrupted = state.tasks[0].interrupts[0].value
             tool_args = interrupted.get("tool_args", {})
+
+            if platform == "system":
+                logger.warning(
+                    "HITL re-interrupt occurred in system context for action '%s'; cannot route approval.",
+                    interrupted.get("action", "unknown"),
+                )
+                return {
+                    "status": "paused_again",
+                    "error": "System run requested interactive approval during resume.",
+                    "action": interrupted.get("action", "unknown"),
+                }
+
             # Loopback HITL
             await channel_manager.request_approval(
                 platform=platform,
