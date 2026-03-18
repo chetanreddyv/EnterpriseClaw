@@ -48,10 +48,12 @@ def load_plugins():
                                     previous_module,
                                 )
 
+                            tool_category = "browser" if tool_name == "batch_actions" else category
+
                             GLOBAL_TOOL_REGISTRY[tool_name] = func
                             GLOBAL_TOOL_METADATA[tool_name] = {
                                 "module": module_name,
-                                "category": category,
+                                "category": tool_category,
                                 # Default execution characteristics used by Worker runtime.
                                 "stateful": (
                                     tool_name.startswith("browser_")

@@ -24,7 +24,7 @@ from langchain_core.runnables import RunnableConfig
 
 from core.graphs.states import WorkerState
 from core.llm import init_agent_llm, is_llm_connection_error
-from core.constants import OBSERVATION_SEPARATOR
+from core.observers import get_browser_environment_state, get_exec_environment_state
 from mcp_servers import (
     GLOBAL_TOOL_REGISTRY,
     GLOBAL_TOOL_METADATA,
@@ -35,6 +35,13 @@ logger = logging.getLogger(__name__)
 # ── Constants ────────────────────────────────────────────────────
 MAX_OBSERVATION_CHARS = 50_000  # ~12,500 tokens
 MAX_SKILL_PROMPT_CHARS = 10_000
+
+TOOL_ERROR_PREFIXES = (
+    "error",
+    "failed",
+    "❌",
+    "action failed",
+)
 
 
 def _normalize_tool_names(raw_tool_names: list[str] | None) -> list[str]:
@@ -97,6 +104,127 @@ def _observation_mode_for_tool(tool_name: str) -> str:
     if mode in {"head", "tail"}:
         return mode
     return "tail" if tool_name.startswith("exec_") else "head"
+
+
+def _truncate_observation(observation: str, tool_name: str) -> str:
+    """Apply metadata-aware truncation to oversized observations."""
+    if len(observation) <= MAX_OBSERVATION_CHARS:
+        return observation
+
+    if _observation_mode_for_tool(tool_name) == "tail":
+        # Terminal output: latest lines tend to be most useful.
+        return "...[TRUNCATED]...\n" + observation[-MAX_OBSERVATION_CHARS:]
+
+    # Browser output: page top and current form region are often near the head.
+    return observation[:MAX_OBSERVATION_CHARS] + "\n...[TRUNCATED]..."
+
+
+def _observation_to_prompt_text(observation: Any) -> str:
+    """Convert string or multimodal observation payload into prompt-safe text."""
+    if isinstance(observation, str):
+        return observation
+
+    if isinstance(observation, list):
+        parts: list[str] = []
+        has_image = False
+        for item in observation:
+            if isinstance(item, dict):
+                item_type = str(item.get("type", "")).strip().lower()
+                if item_type == "text":
+                    text = str(item.get("text", "")).strip()
+                    if text:
+                        parts.append(text)
+                elif item_type == "image_url":
+                    has_image = True
+            elif isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+
+        if has_image:
+            parts.append("[Visual context image attached in observation payload]")
+
+        if parts:
+            return "\n\n".join(parts)
+        return "No environment state available yet."
+
+    text = str(observation).strip()
+    return text or "No environment state available yet."
+
+
+def _tool_category(tool_name: str) -> str:
+    """Resolve normalized runtime category for a tool."""
+    metadata = GLOBAL_TOOL_METADATA.get(tool_name, {})
+    category = str(metadata.get("category", "")).strip().lower()
+    if category:
+        return category
+    if tool_name.startswith("browser_") or tool_name == "batch_actions":
+        return "browser"
+    if tool_name.startswith("exec_"):
+        return "exec"
+    return ""
+
+
+def _observation_categories_for_tools(tool_names: list[str]) -> set[str]:
+    """Determine which observer pipelines should run after tool execution."""
+    categories: set[str] = set()
+    for tool_name in tool_names:
+        category = _tool_category(tool_name)
+        if category == "browser":
+            categories.add("browser")
+        elif category == "exec":
+            categories.add("exec")
+    return categories
+
+
+def _looks_like_tool_error(text: str) -> bool:
+    normalized = str(text).strip().lower()
+    if not normalized:
+        return True
+    return normalized.startswith(TOOL_ERROR_PREFIXES)
+
+
+def _summarize_tool_result(tool_name: str, result_content: str) -> str:
+    """Keep action ledger lightweight while preserving error diagnostics."""
+    summary = str(result_content).strip()
+    if _looks_like_tool_error(summary):
+        return summary
+
+    category = _tool_category(tool_name)
+    if category in {"browser", "exec"} and len(summary) > 240:
+        return f"Action successful: {tool_name}."
+
+    return summary or f"Action successful: {tool_name}."
+
+
+async def _refresh_observation_after_tools(tool_names: list[str], config: RunnableConfig) -> Any | None:
+    """Fetch post-action environment state using category-specific observers."""
+    categories = _observation_categories_for_tools(tool_names)
+    if not categories:
+        return None
+
+    browser_state: Any | None = None
+    sections: list[str] = []
+    if "browser" in categories:
+        browser_state = await get_browser_environment_state(config)
+        if isinstance(browser_state, list) and "exec" not in categories:
+            return browser_state
+        sections.append(
+            _truncate_observation(_observation_to_prompt_text(browser_state), "browser_snapshot")
+        )
+    if "exec" in categories:
+        exec_state = await get_exec_environment_state(config)
+        sections.append(_truncate_observation(_observation_to_prompt_text(exec_state), "exec_command"))
+
+    if not sections:
+        return None
+
+    combined = "\n\n".join(section for section in sections if section.strip()).strip()
+    if not combined:
+        return None
+
+    if len(combined) > MAX_OBSERVATION_CHARS:
+        combined = combined[:MAX_OBSERVATION_CHARS] + "\n...[TRUNCATED]..."
+
+    return combined
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -174,7 +302,8 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
     Build the Worker prompt from objective + observation + JIT skill context.
     """
     objective = state.get("objective", "Complete the assigned task.")
-    observation = state.get("observation", "No environment state available yet.")
+    observation_raw = state.get("observation", "No environment state available yet.")
+    observation = _observation_to_prompt_text(observation_raw)
     step_count = state.get("step_count", 0)
     max_steps = state.get("max_steps", 15)
     active_skill_tools = state.get("active_skill_tools") or []
@@ -223,6 +352,9 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
         f"- Take the NEXT action to accomplish your objective.\n"
         f"{batch_actions_hint}"
         f"{escalation_only_hint}"
+        f"- The `Current Environment State` below updates automatically after every action you take. "
+        f"Do not use tools only to 'look' at the screen or terminal immediately after an action; "
+        f"read the provided state first.\n"
         f"- Never invent tool names. Use only the exact tool names listed in `Bound tools` above.\n"
         f"- If the exact tool you want is unavailable, use `escalate_to_supervisor` instead of guessing.\n"
         f"- If you are stuck, confused, or the environment is not responding, "
@@ -381,7 +513,7 @@ async def _execute_single_tool(action_name: str, tool_args: dict, config: Runnab
         if isinstance(result, list):
             is_multimodal = len(result) > 0 and isinstance(result[0], dict) and "type" in result[0]
             if is_multimodal:
-                return result
+                return "Action successful: multimodal output captured."
             try:
                 return json.dumps(result)
             except Exception:
@@ -391,32 +523,6 @@ async def _execute_single_tool(action_name: str, tool_args: dict, config: Runnab
     except Exception as e:
         logger.error(f"  -> Worker tool {action_name} failed: {e}")
         return f"Error executing {action_name}: {e}"
-
-
-def _split_observation(raw_output: str, tool_name: str) -> tuple[str, str | None]:
-    """
-    Split tool output on OBSERVATION_SEPARATOR.
-    Returns (lightweight_summary, heavy_observation_or_None).
-    Applies truncation strategy based on the producing tool.
-    """
-    if OBSERVATION_SEPARATOR in raw_output:
-        parts = raw_output.split(OBSERVATION_SEPARATOR, 1)
-        summary = parts[0].strip()
-        observation = parts[1].strip()
-
-        # Truncate oversized observations
-        if len(observation) > MAX_OBSERVATION_CHARS:
-            if _observation_mode_for_tool(tool_name) == "tail":
-                # Terminal: keep the TAIL (most recent output is most relevant)
-                observation = "...[TRUNCATED]...\n" + observation[-MAX_OBSERVATION_CHARS:]
-            else:
-                # Browser: keep the HEAD (top of page / form fields are most relevant)
-                observation = observation[:MAX_OBSERVATION_CHARS] + "\n...[TRUNCATED]..."
-
-        return summary, observation
-    else:
-        # No separator — entire output is the summary (simple tool)
-        return raw_output, None
 
 
 def _execution_mode(state: WorkerState, config: RunnableConfig) -> str:
@@ -447,9 +553,8 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
     - Stateful tools: Sequential, halt on first failure.
     - Read-only tools: Concurrent via asyncio.gather.
 
-    CRITICAL: Tool results are SPLIT:
-    - Lightweight summary → ToolMessage (stays in messages)
-    - Heavy observation → state["observation"] (REPLACED, never appended)
+    CRITICAL: Tool results are action summaries only.
+    Observation is refreshed centrally after actions via environment observers.
     
     HITL: Before executing any tool, checks tiered approval.
     NOT_ALLOWED tools fire interrupt() unless /permit'd.
@@ -477,6 +582,7 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
 
     tool_messages = []
     latest_observation = None  # Will hold the LAST observation (replaces, not appends)
+    executed_tool_names: list[str] = []
     tool_calls = list(last_message.tool_calls)
 
     # ── Check for escalation sentinel ──
@@ -549,11 +655,12 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
                     break
 
             logger.info(f"🛠️ Worker executing (sequential): {action_name}")
+            executed_tool_names.append(action_name)
 
             result_content = await _execute_single_tool(action_name, tool_call["args"], config)
 
             # Handle exceptions as strings
-            if isinstance(result_content, str) and result_content.startswith("Error"):
+            if isinstance(result_content, str) and _looks_like_tool_error(result_content):
                 tool_messages.append(ToolMessage(content=result_content, tool_call_id=call_id))
                 # Halt: skip remaining tools
                 for remaining in tool_calls[idx + 1:]:
@@ -563,14 +670,8 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
                     ))
                 break
 
-            # Split observation from summary
-            if isinstance(result_content, str):
-                summary, obs = _split_observation(result_content, action_name)
-                tool_messages.append(ToolMessage(content=summary, tool_call_id=call_id))
-                if obs is not None:
-                    latest_observation = obs  # REPLACE, not append
-            else:
-                tool_messages.append(ToolMessage(content=str(result_content), tool_call_id=call_id))
+            summary = _summarize_tool_result(action_name, str(result_content))
+            tool_messages.append(ToolMessage(content=summary, tool_call_id=call_id))
     else:
         # CONCURRENT: Read-only tools can run in parallel
         # First, check HITL for any tool that requires approval (rare in read-only domain)
@@ -613,20 +714,19 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
             for tc in executable_tool_calls
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        executed_tool_names.extend(tc["name"] for tc in executable_tool_calls)
 
         for tool_call, result_content in zip(executable_tool_calls, results):
             call_id = tool_call["id"]
+            action_name = tool_call["name"]
 
             if isinstance(result_content, Exception):
-                result_content = f"Error executing {tool_call['name']}: {str(result_content)}"
+                result_content = f"Error executing {action_name}: {str(result_content)}"
 
-            if isinstance(result_content, str):
-                summary, obs = _split_observation(result_content, tool_call["name"])
-                tool_messages.append(ToolMessage(content=summary, tool_call_id=call_id))
-                if obs is not None:
-                    latest_observation = obs
-            else:
-                tool_messages.append(ToolMessage(content=str(result_content), tool_call_id=call_id))
+            summary = _summarize_tool_result(action_name, str(result_content))
+            tool_messages.append(ToolMessage(content=summary, tool_call_id=call_id))
+
+    latest_observation = await _refresh_observation_after_tools(executed_tool_names, config)
 
     # Build update payload
     update_payload: Dict[str, Any] = {"messages": tool_messages}

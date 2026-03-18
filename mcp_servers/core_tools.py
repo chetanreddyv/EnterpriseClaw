@@ -3,8 +3,6 @@ import logging
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 
-from core.constants import OBSERVATION_SEPARATOR
-
 logger = logging.getLogger(__name__)
 
 @tool
@@ -136,8 +134,8 @@ def escalate_to_supervisor(reason: str) -> str:
 @tool
 async def batch_actions(actions: list, config: RunnableConfig = None) -> str:
     """
-    Execute multiple actions sequentially in one turn for efficiency.
-    Only takes the expensive observation snapshot at the very end (or at the point of failure).
+    Execute multiple browser actions sequentially in one turn for efficiency.
+    Returns only an action summary; environment state is refreshed by the Worker observer loop.
     
     Args:
         actions (list): A list of action dictionaries. Each action has:
@@ -189,31 +187,16 @@ async def batch_actions(actions: list, config: RunnableConfig = None) -> str:
             await page.wait_for_timeout(200)
 
     except Exception as e:
-        # Partial failure: snapshot at point of crash
-        try:
-            from mcp_servers.browser_tools import browser_snapshot
-            snapshot = await browser_snapshot.ainvoke({}, config=config)
-        except Exception:
-            snapshot = "Failed to capture snapshot after error."
-
         summary = (
             f"Batch failed at step {len(results) + 1}/{len(actions)} "
             f"({action.get('type', '?')} '{action.get('selector', '?')}')\n"
             f"Error: {str(e)}\n"
             f"Previous {len(results)} actions completed: {', '.join(results)}"
         )
-        return f"{summary}{OBSERVATION_SEPARATOR}{snapshot}"
-
-    # Full success: snapshot at the end
-    try:
-        from mcp_servers.browser_tools import browser_snapshot
-        await page.wait_for_load_state("networkidle", timeout=3000)
-        snapshot = await browser_snapshot.ainvoke({}, config=config)
-    except Exception:
-        snapshot = "Page state captured but snapshot failed."
+        return f"Action failed: {summary}"
 
     summary = "Batch completed: " + ", ".join(results)
-    return f"{summary}{OBSERVATION_SEPARATOR}{snapshot}"
+    return f"Action successful: {summary}"
 
 
 # ═══════════════════════════════════════════════════════════════

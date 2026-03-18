@@ -6,7 +6,7 @@ The Worker's messages are a lightweight action ledger; heavy environment
 state lives only in `observation`, which is REPLACED (not appended) each turn.
 """
 
-from typing import Annotated, TypedDict, NotRequired
+from typing import Annotated, TypedDict, NotRequired, Any
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
@@ -62,8 +62,9 @@ class WorkerState(TypedDict):
     # The task objective passed down from the Supervisor
     objective: str
     
-    # REPLACED each turn. Current A11y tree / terminal output / diff.
-    observation: str
+    # REPLACED each turn. Current browser/exec environment state.
+    # May be text-only or multimodal payload blocks.
+    observation: str | list[dict[str, Any]]
     
     # JIT skill context fetched once from the Worker objective
     skill_prompts: str

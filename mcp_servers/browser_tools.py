@@ -22,21 +22,12 @@ from pydantic import Field
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 
-from core.constants import OBSERVATION_SEPARATOR
 from core.text_utils import get_thread_id, smart_truncate
 
 logger = logging.getLogger("mcp.browser_tools")
 
 SCREENSHOT_DIR = Path("./data/screenshots")
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
-
-
-async def _capture_snapshot(config) -> str:
-    """Capture an A11y snapshot of the current page for forced observation."""
-    try:
-        return await browser_snapshot.ainvoke({}, config=config)
-    except Exception as e:
-        return f"(Snapshot capture failed: {e})"
 
 
 def _log_strategy_failure(tool_name: str, strategy: str, selector: str, error: Exception) -> None:
@@ -49,6 +40,117 @@ def _log_strategy_failure(tool_name: str, strategy: str, selector: str, error: E
         type(error).__name__,
         error,
     )
+
+
+async def get_current_page_context(config: RunnableConfig = None) -> dict[str, str]:
+    """Return URL and title breadcrumbs for the active page."""
+    thread_id = _get_thread_id(config)
+    page = await BrowserSessionManager.get_page(thread_id)
+    if page.url == "about:blank":
+        return {"url": "about:blank", "title": "(blank page)"}
+
+    title = await page.title()
+    return {"url": page.url, "title": title}
+
+
+async def get_interactive_element_index(
+    config: RunnableConfig = None,
+    max_elements: int = 80,
+) -> dict[str, Any]:
+    """Return a compressed index of visible interactive elements."""
+    thread_id = _get_thread_id(config)
+    page = await BrowserSessionManager.get_page(thread_id)
+    if page.url == "about:blank":
+        return {
+            "url": "about:blank",
+            "title": "(blank page)",
+            "elements": [],
+        }
+
+    snapshot_js = r"""
+    (maxElements) => {
+        const pickText = (el) => {
+            const aria = el.getAttribute('aria-label') || '';
+            const placeholder = el.getAttribute('placeholder') || '';
+            const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+            return aria || placeholder || text || '';
+        };
+
+        const isVisible = (el) => {
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                return false;
+            }
+            const rect = el.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) {
+                return false;
+            }
+            if (rect.bottom < 0 || rect.top > (window.innerHeight || document.documentElement.clientHeight)) {
+                return false;
+            }
+            return true;
+        };
+
+        const isInteractive = (el) => {
+            const tag = el.tagName.toLowerCase();
+            if (['a', 'button', 'input', 'select', 'textarea', 'summary'].includes(tag)) {
+                return true;
+            }
+            if (el.getAttribute('role')) {
+                return true;
+            }
+            if (el.hasAttribute('onclick') || el.hasAttribute('href')) {
+                return true;
+            }
+            return false;
+        };
+
+        const attrsToKeep = ['href', 'type', 'name', 'placeholder', 'id', 'role'];
+        const selectors = 'a, button, input, select, textarea, summary, [role], [onclick], [href]';
+        const nodes = Array.from(document.querySelectorAll(selectors));
+
+        const seen = new Set();
+        const elements = [];
+        let nextId = 1;
+
+        for (const el of nodes) {
+            if (elements.length >= maxElements) break;
+            if (!isInteractive(el) || !isVisible(el)) continue;
+
+            const tag = el.tagName.toLowerCase();
+            const attrs = [];
+            for (const attrName of attrsToKeep) {
+                const attrValue = el.getAttribute(attrName);
+                if (!attrValue) continue;
+                const normalized = String(attrValue).replace(/\s+/g, ' ').trim().slice(0, 80);
+                attrs.push(`${attrName}="${normalized}"`);
+            }
+
+            const text = pickText(el).slice(0, 90);
+            const signature = `${tag}|${attrs.join('|')}|${text}`;
+            if (seen.has(signature)) continue;
+            seen.add(signature);
+
+            elements.push({
+                index: nextId,
+                tag,
+                attrs,
+                text,
+            });
+            nextId += 1;
+        }
+
+        return elements;
+    }
+    """
+
+    elements = await page.evaluate(snapshot_js, max(10, min(max_elements, 200)))
+    context = await get_current_page_context(config)
+    return {
+        "url": context["url"],
+        "title": context["title"],
+        "elements": elements,
+    }
 
 
 # ══════════════════════════════════════════════════════════════
@@ -205,9 +307,7 @@ async def browser_navigate(
         page = await BrowserSessionManager.get_page(thread_id)
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         title = await page.title()
-        text_content = await page.inner_text("body")
-        text_content = smart_truncate(text_content, max_chars=12000)
-        return f"## Page Loaded: {title}\n**URL**: {url}\n\n{text_content}"
+        return f"Action successful: navigated to {url}. Current page: {title} ({page.url})"
     except Exception as e:
         logger.error(f"❌ browser_navigate failed: {e}")
         return f"Failed to navigate to {url}: {type(e).__name__} - {str(e)}"
@@ -322,56 +422,59 @@ async def browser_wait_for(
 
 @tool
 async def browser_snapshot(
+    format: str = Field(
+        "interactive_index",
+        description="Snapshot format: 'interactive_index' (default) or 'legacy'.",
+    ),
+    max_elements: int = Field(
+        80,
+        description="Maximum number of visible interactive elements to include (10-200).",
+    ),
     config: RunnableConfig = None,
 ) -> str:
     """
-    Capture a structured snapshot of all interactive elements on the current page.
-    Returns roles, names, and values of all buttons, links, inputs, selects, etc.
-    Much more useful than raw text for finding the right selectors to click or type into.
+    Capture a structured snapshot of interactive elements on the current page.
+    Default output is a compressed, indexed map of visible interactables.
     """
-    thread_id = _get_thread_id(config)
     try:
-        page = await BrowserSessionManager.get_page(thread_id)
+        page = await BrowserSessionManager.get_page(_get_thread_id(config))
         if page.url == "about:blank":
             return "No page is currently loaded. Use browser_navigate first."
 
-        # Extract interactive elements via JavaScript
-        snapshot_js = """
-        () => {
-            const elements = [];
-            const interactiveSelectors = 'a, button, input, select, textarea, [role], [aria-label], [onclick], summary, details';
-            document.querySelectorAll(interactiveSelectors).forEach((el, idx) => {
-                const rect = el.getBoundingClientRect();
-                if (rect.width === 0 && rect.height === 0) return; // Skip hidden
-                const role = el.getAttribute('role') || el.tagName.toLowerCase();
-                const name = el.getAttribute('aria-label')
-                    || el.getAttribute('name')
-                    || el.getAttribute('placeholder')
-                    || el.textContent?.trim().substring(0, 80)
-                    || '';
-                const type = el.getAttribute('type') || '';
-                const value = el.value || '';
-                const href = el.getAttribute('href') || '';
-                let entry = `[${idx}] <${role}>`;
-                if (type) entry += ` type="${type}"`;
-                if (name) entry += ` "${name}"`;
-                if (value) entry += ` value="${value}"`;
-                if (href) entry += ` href="${href}"`;
-                const id = el.id ? ` id="${el.id}"` : '';
-                const cls = el.className ? ` class="${String(el.className).substring(0, 50)}"` : '';
-                entry += id + cls;
-                elements.push(entry);
-            });
-            return elements.join('\\n');
-        }
-        """
-        tree_text = await page.evaluate(snapshot_js)
-        if not tree_text:
+        if str(format).strip().lower() == "legacy":
+            context = await get_current_page_context(config)
+            text_content = await page.inner_text("body")
+            text_content = smart_truncate(text_content, max_chars=12000)
+            return (
+                f"## Interactive Elements: {context['title']}\n"
+                f"**URL**: {context['url']}\n\n"
+                f"{text_content}"
+            )
+
+        snapshot = await get_interactive_element_index(config=config, max_elements=max_elements)
+        elements = snapshot.get("elements", [])
+        if not elements:
             return "No interactive elements found on this page. Try browser_get_text instead."
 
-        tree_text = smart_truncate(tree_text, max_chars=12000)
-        title = await page.title()
-        return f"## Interactive Elements: {title}\n**URL**: {page.url}\n\n```\n{tree_text}\n```"
+        lines: list[str] = []
+        for item in elements:
+            idx = item.get("index", "?")
+            tag = str(item.get("tag", "element"))
+            attrs = item.get("attrs", []) or []
+            attrs_str = f" {' '.join(attrs)}" if attrs else ""
+            text = str(item.get("text", "")).strip()
+            if tag == "input":
+                line = f"[{idx}] <{tag}{attrs_str}>"
+            else:
+                line = f"[{idx}] <{tag}{attrs_str}>{text}</{tag}>" if text else f"[{idx}] <{tag}{attrs_str}></{tag}>"
+            lines.append(line)
+
+        element_map = smart_truncate("\n".join(lines), max_chars=5000)
+        return (
+            f"URL: {snapshot.get('url', page.url)}\n"
+            f"Title: {snapshot.get('title', '(unknown)')}\n\n"
+            f"Interactive Elements:\n{element_map}"
+        )
     except Exception as e:
         return f"Failed to capture snapshot: {type(e).__name__} - {str(e)}"
 
@@ -497,9 +600,7 @@ async def browser_click(
         if not summary:
             return f"❌ Could not find element matching '{selector}'. Try browser_snapshot to inspect the page."
 
-        # ── FORCED OBSERVATION: Capture new page state ──
-        snapshot = await _capture_snapshot(config)
-        return f"{summary}{OBSERVATION_SEPARATOR}{snapshot}"
+        return f"Action successful: {summary}"
     except Exception as e:
         return f"Failed to click '{selector}': {type(e).__name__} - {str(e)}"
 
@@ -543,15 +644,13 @@ async def browser_type(
         if not filled:
             return f"❌ Could not find input matching '{selector}'. Try browser_snapshot to inspect the page."
 
-        summary = f"✅ Typed '{text}' into `{selector}`."
+        summary = f"typed into `{selector}`"
         if submit:
             await page.keyboard.press("Enter")
             await page.wait_for_load_state("domcontentloaded", timeout=10000)
-            summary += f" Submitted. Page: **{await page.title()}** ({page.url})"
+            summary += " and submitted"
 
-        # ── FORCED OBSERVATION: Capture new page state ──
-        snapshot = await _capture_snapshot(config)
-        return f"{summary}{OBSERVATION_SEPARATOR}{snapshot}"
+        return f"Action successful: {summary}."
     except Exception as e:
         return f"Failed to type into '{selector}': {type(e).__name__} - {str(e)}"
 
@@ -571,10 +670,10 @@ async def browser_execute_js(
         if page.url == "about:blank":
             return "No page is currently loaded. Use browser_navigate first."
         result = await page.evaluate(script)
-        result_str = str(result) if result is not None else "(no return value)"
-        if len(result_str) > 5000:
-            result_str = result_str[:5000] + "\n... [Output truncated]"
-        return f"✅ JavaScript executed.\n\nResult:\n```\n{result_str}\n```"
+        result_preview = str(result) if result is not None else "(no return value)"
+        if len(result_preview) > 180:
+            result_preview = result_preview[:180] + "..."
+        return f"Action successful: JavaScript executed. Result preview: {result_preview}"
     except Exception as e:
         return f"JavaScript execution failed: {type(e).__name__} - {str(e)}"
 
@@ -620,9 +719,7 @@ async def browser_select_option(
         if not summary:
             return f"❌ Could not select '{value}' in `{selector}`. Verify the selector and available options."
 
-        # ── FORCED OBSERVATION: Capture new page state ──
-        snapshot = await _capture_snapshot(config)
-        return f"{summary}{OBSERVATION_SEPARATOR}{snapshot}"
+        return f"Action successful: {summary}"
     except Exception as e:
         return f"Failed to select option: {type(e).__name__} - {str(e)}"
 
@@ -645,11 +742,8 @@ async def browser_press_key(
         page = await BrowserSessionManager.get_page(thread_id)
         await page.keyboard.press(key)
         await asyncio.sleep(0.3)
-        summary = f"✅ Pressed '{key}'."
-
-        # ── FORCED OBSERVATION: Capture new page state ──
-        snapshot = await _capture_snapshot(config)
-        return f"{summary}{OBSERVATION_SEPARATOR}{snapshot}"
+        summary = f"Action successful: pressed '{key}'."
+        return summary
     except Exception as e:
         return f"Failed to press key '{key}': {type(e).__name__} - {str(e)}"
 
@@ -697,9 +791,7 @@ async def browser_hover(
         if not summary:
             return f"❌ Could not find element matching '{selector}'. Try browser_snapshot to inspect the page."
 
-        # ── FORCED OBSERVATION: Capture new page state ──
-        snapshot = await _capture_snapshot(config)
-        return f"{summary}{OBSERVATION_SEPARATOR}{snapshot}"
+        return f"Action successful: {summary}"
     except Exception as e:
         return f"Failed to hover: {type(e).__name__} - {str(e)}"
 
