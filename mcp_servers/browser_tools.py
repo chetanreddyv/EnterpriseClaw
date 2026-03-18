@@ -29,6 +29,10 @@ logger = logging.getLogger("mcp.browser_tools")
 SCREENSHOT_DIR = Path("./data/screenshots")
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
+SOM_ID_ATTR = "data-claw-id"
+SOM_PREV_OUTLINE_ATTR = "data-claw-prev-outline"
+SOM_OVERLAY_ID = "claw-som-overlay"
+
 
 def _log_strategy_failure(tool_name: str, strategy: str, selector: str, error: Exception) -> None:
     """Debug-level visibility for fallback strategy failures."""
@@ -56,6 +60,7 @@ async def get_current_page_context(config: RunnableConfig = None) -> dict[str, s
 async def get_interactive_element_index(
     config: RunnableConfig = None,
     max_elements: int = 80,
+    annotate_dom: bool = False,
 ) -> dict[str, Any]:
     """Return a compressed index of visible interactive elements."""
     thread_id = _get_thread_id(config)
@@ -68,7 +73,7 @@ async def get_interactive_element_index(
         }
 
     snapshot_js = r"""
-    (maxElements) => {
+    (maxElements, annotateDom, idAttr) => {
         const pickText = (el) => {
             const aria = el.getAttribute('aria-label') || '';
             const placeholder = el.getAttribute('placeholder') || '';
@@ -109,6 +114,10 @@ async def get_interactive_element_index(
         const selectors = 'a, button, input, select, textarea, summary, [role], [onclick], [href]';
         const nodes = Array.from(document.querySelectorAll(selectors));
 
+        if (annotateDom) {
+            document.querySelectorAll(`[${idAttr}]`).forEach((el) => el.removeAttribute(idAttr));
+        }
+
         const seen = new Set();
         const elements = [];
         let nextId = 1;
@@ -118,6 +127,7 @@ async def get_interactive_element_index(
             if (!isInteractive(el) || !isVisible(el)) continue;
 
             const tag = el.tagName.toLowerCase();
+            const rect = el.getBoundingClientRect();
             const attrs = [];
             for (const attrName of attrsToKeep) {
                 const attrValue = el.getAttribute(attrName);
@@ -127,9 +137,13 @@ async def get_interactive_element_index(
             }
 
             const text = pickText(el).slice(0, 90);
-            const signature = `${tag}|${attrs.join('|')}|${text}`;
+            const signature = `${tag}|${attrs.join('|')}|${text}|${Math.round(rect.left)}|${Math.round(rect.top)}|${Math.round(rect.width)}|${Math.round(rect.height)}`;
             if (seen.has(signature)) continue;
             seen.add(signature);
+
+            if (annotateDom) {
+                el.setAttribute(idAttr, String(nextId));
+            }
 
             elements.push({
                 index: nextId,
@@ -144,13 +158,111 @@ async def get_interactive_element_index(
     }
     """
 
-    elements = await page.evaluate(snapshot_js, max(10, min(max_elements, 200)))
+    elements = await page.evaluate(
+        snapshot_js,
+        max(10, min(max_elements, 200)),
+        bool(annotate_dom),
+        SOM_ID_ATTR,
+    )
     context = await get_current_page_context(config)
     return {
         "url": context["url"],
         "title": context["title"],
         "elements": elements,
     }
+
+
+async def _inject_som_overlay(page) -> int:
+    """Draw temporary numbered overlays for currently annotated interactive elements."""
+    overlay_js = r"""
+    (idAttr, overlayId, prevOutlineAttr) => {
+        const staleOverlay = document.getElementById(overlayId);
+        if (staleOverlay) staleOverlay.remove();
+        document.querySelectorAll('.claw-som-label').forEach((node) => node.remove());
+
+        const elements = Array.from(document.querySelectorAll(`[${idAttr}]`));
+        if (!elements.length) return 0;
+
+        const root = document.createElement('div');
+        root.id = overlayId;
+        root.setAttribute('aria-hidden', 'true');
+        root.style.position = 'fixed';
+        root.style.left = '0';
+        root.style.top = '0';
+        root.style.width = '100vw';
+        root.style.height = '100vh';
+        root.style.pointerEvents = 'none';
+        root.style.zIndex = '2147483647';
+        (document.body || document.documentElement).appendChild(root);
+
+        let drawn = 0;
+        for (const el of elements) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) continue;
+            if (rect.bottom < 0 || rect.top > window.innerHeight || rect.right < 0 || rect.left > window.innerWidth) {
+                continue;
+            }
+
+            const id = el.getAttribute(idAttr);
+            if (!id) continue;
+
+            if (!el.hasAttribute(prevOutlineAttr)) {
+                el.setAttribute(prevOutlineAttr, el.style.outline || '');
+            }
+            el.style.outline = '2px solid #ff3b30';
+            el.style.outlineOffset = '1px';
+
+            const label = document.createElement('div');
+            label.className = 'claw-som-label';
+            label.textContent = id;
+            label.style.position = 'fixed';
+            label.style.left = `${Math.max(0, Math.round(rect.left))}px`;
+            label.style.top = `${Math.max(0, Math.round(rect.top - 14))}px`;
+            label.style.background = '#ff3b30';
+            label.style.color = '#ffffff';
+            label.style.fontFamily = 'monospace';
+            label.style.fontSize = '11px';
+            label.style.fontWeight = '700';
+            label.style.lineHeight = '1';
+            label.style.padding = '2px 4px';
+            label.style.borderRadius = '3px';
+            label.style.boxShadow = '0 1px 2px rgba(0, 0, 0, 0.35)';
+            label.style.pointerEvents = 'none';
+            label.style.zIndex = '2147483647';
+            root.appendChild(label);
+
+            drawn += 1;
+        }
+
+        return drawn;
+    }
+    """
+
+    return int(await page.evaluate(overlay_js, SOM_ID_ATTR, SOM_OVERLAY_ID, SOM_PREV_OUTLINE_ATTR))
+
+
+async def _cleanup_som_overlay(page) -> None:
+    """Remove temporary Set-of-Marks overlays and attributes from the DOM."""
+    cleanup_js = r"""
+    (idAttr, overlayId, prevOutlineAttr) => {
+        const overlay = document.getElementById(overlayId);
+        if (overlay) overlay.remove();
+        document.querySelectorAll('.claw-som-label').forEach((node) => node.remove());
+
+        document.querySelectorAll(`[${idAttr}]`).forEach((el) => {
+            if (el.hasAttribute(prevOutlineAttr)) {
+                el.style.outline = el.getAttribute(prevOutlineAttr) || '';
+                el.removeAttribute(prevOutlineAttr);
+            } else {
+                el.style.outline = '';
+            }
+            el.style.outlineOffset = '';
+            el.removeAttribute(idAttr);
+        });
+    }
+    """
+
+    await page.evaluate(cleanup_js, SOM_ID_ATTR, SOM_OVERLAY_ID, SOM_PREV_OUTLINE_ATTR)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -169,6 +281,7 @@ class BrowserSessionManager:
     _contexts: Dict[str, dict] = {}   # thread_id -> {"context", "pages", "active_page_idx", "last_accessed"}
     _gc_task = None
     _lock = asyncio.Lock()
+    _page_listener_registered = False
 
     GC_INTERVAL_SECONDS = 600   # Sweep every 10 minutes
     IDLE_TIMEOUT_SECONDS = 1800  # Close contexts idle > 30 minutes
@@ -200,11 +313,69 @@ class BrowserSessionManager:
             )
             # Auto-handle dialogs (accept by default) unless explicitly managed
             cls._browser.on("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
+            if not cls._page_listener_registered:
+                cls._browser.on("page", lambda page: asyncio.create_task(cls._handle_new_page_event(page)))
+                cls._page_listener_registered = True
             
 
             # Start GC sweep
             if cls._gc_task is None:
                 cls._gc_task = asyncio.create_task(cls._gc_loop())
+
+    @classmethod
+    def _find_entry_by_page(cls, target_page):
+        for entry in cls._contexts.values():
+            for page in entry.get("pages", []):
+                if page is target_page:
+                    return entry
+        return None
+
+    @classmethod
+    async def _handle_new_page_event(cls, new_page):
+        """Auto-focus new tabs opened from an existing tracked page."""
+        try:
+            opener_page = await new_page.opener()
+        except Exception as e:
+            logger.debug("Failed to resolve opener for new page: %s", e)
+            opener_page = None
+
+        # Ignore pages without an opener to avoid cross-thread mis-assignment.
+        if opener_page is None:
+            return
+
+        try:
+            await new_page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception:
+            # Some pages never reach this state quickly; still track/focus them.
+            pass
+
+        async with cls._lock:
+            entry = cls._find_entry_by_page(opener_page)
+            if not entry:
+                return
+
+            pages = entry.get("pages", [])
+            if not any(page is new_page for page in pages):
+                pages.append(new_page)
+
+            for idx, page in enumerate(pages):
+                if page is new_page:
+                    entry["active_page_idx"] = idx
+                    break
+
+            entry["last_accessed"] = time.time()
+            entry["just_opened_new_tab"] = True
+
+    @classmethod
+    async def pop_new_tab_notice(cls, thread_id: str) -> bool:
+        """Return and reset per-thread new-tab notice flag."""
+        async with cls._lock:
+            entry = cls._contexts.get(thread_id)
+            if not entry:
+                return False
+            opened = bool(entry.get("just_opened_new_tab"))
+            entry["just_opened_new_tab"] = False
+            return opened
 
     @classmethod
     async def get_page(cls, thread_id: str):
@@ -230,6 +401,7 @@ class BrowserSessionManager:
                 "pages": [page],
                 "active_page_idx": 0,
                 "last_accessed": time.time(),
+                "just_opened_new_tab": False,
             }
             return page
 
@@ -268,6 +440,7 @@ class BrowserSessionManager:
             await cls._playwright.stop()
             cls._playwright = None
         cls._default_page_used = False
+        cls._page_listener_registered = False
 
     @classmethod
     async def _gc_loop(cls):
@@ -336,32 +509,47 @@ async def browser_screenshot(
     config: RunnableConfig = None,
 ) -> list:
     """
-    Take a screenshot of the current page. Returns the image as a multimodal
-    content block so you can visually inspect the page layout and content.
-    Also saves the PNG to disk for user reference.
+    Take a compressed screenshot of the current page and return a multimodal payload.
+    Uses JPEG quality compression to reduce token and latency overhead.
     """
     thread_id = _get_thread_id(config)
+    page = None
     try:
         page = await BrowserSessionManager.get_page(thread_id)
         if page.url == "about:blank":
             return "No page is currently loaded. Use browser_navigate first."
 
+        marker_count = await page.evaluate(
+            "(idAttr) => document.querySelectorAll(`[${idAttr}]`).length",
+            SOM_ID_ATTR,
+        )
+        if int(marker_count) == 0:
+            await get_interactive_element_index(config=config, max_elements=80, annotate_dom=True)
+
+        await _inject_som_overlay(page)
+
         # Save to disk
         timestamp = int(time.time())
-        filename = f"{thread_id}_{timestamp}.png"
+        filename = f"{thread_id}_{timestamp}.jpg"
         filepath = SCREENSHOT_DIR / filename
-        screenshot_bytes = await page.screenshot(full_page=False)
+        screenshot_bytes = await page.screenshot(type="jpeg", quality=50, full_page=False)
         filepath.write_bytes(screenshot_bytes)
 
         # Return multimodal content block for LLM vision
         b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
         return [
-            {"type": "text", "text": f"Screenshot of {page.url} (saved to {filepath}):"},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+            {"type": "text", "text": f"Set-of-Marks screenshot of {page.url} (saved to {filepath})."},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
         ]
     except Exception as e:
         logger.error(f"❌ browser_screenshot failed: {e}")
         return f"Failed to take screenshot: {type(e).__name__} - {str(e)}"
+    finally:
+        if page is not None:
+            try:
+                await _cleanup_som_overlay(page)
+            except Exception as cleanup_error:
+                logger.debug("Failed to cleanup Set-of-Marks overlay: %s", cleanup_error)
 
 
 @tool
@@ -395,7 +583,7 @@ async def browser_scroll(
         delta = pixels if direction == "down" else -pixels
         await page.mouse.wheel(0, delta)
         await asyncio.sleep(0.5)  # Let content load
-        return f"✅ Scrolled {direction} by {pixels}px. Use browser_get_text or browser_screenshot to see the new content."
+        return f"Action successful: scrolled {direction} by {pixels}px."
     except Exception as e:
         return f"Failed to scroll: {type(e).__name__} - {str(e)}"
 
@@ -422,10 +610,6 @@ async def browser_wait_for(
 
 @tool
 async def browser_snapshot(
-    format: str = Field(
-        "interactive_index",
-        description="Snapshot format: 'interactive_index' (default) or 'legacy'.",
-    ),
     max_elements: int = Field(
         80,
         description="Maximum number of visible interactive elements to include (10-200).",
@@ -441,20 +625,10 @@ async def browser_snapshot(
         if page.url == "about:blank":
             return "No page is currently loaded. Use browser_navigate first."
 
-        if str(format).strip().lower() == "legacy":
-            context = await get_current_page_context(config)
-            text_content = await page.inner_text("body")
-            text_content = smart_truncate(text_content, max_chars=12000)
-            return (
-                f"## Interactive Elements: {context['title']}\n"
-                f"**URL**: {context['url']}\n\n"
-                f"{text_content}"
-            )
-
         snapshot = await get_interactive_element_index(config=config, max_elements=max_elements)
         elements = snapshot.get("elements", [])
         if not elements:
-            return "No interactive elements found on this page. Try browser_get_text instead."
+            return "No interactive elements found on this page."
 
         lines: list[str] = []
         for item in elements:
@@ -507,8 +681,10 @@ async def browser_tab_management(
 
         elif action == "new":
             new_page = await entry["context"].new_page()
-            pages.append(new_page)
-            entry["active_page_idx"] = len(pages) - 1
+            if not any(p is new_page for p in pages):
+                pages.append(new_page)
+            entry["active_page_idx"] = next(i for i, p in enumerate(pages) if p is new_page)
+            entry["just_opened_new_tab"] = False
             return f"✅ Opened new tab (index {len(pages) - 1}). Use browser_navigate to load a page."
 
         elif action == "switch":
@@ -527,12 +703,43 @@ async def browser_tab_management(
                 return "❌ Cannot close the last tab. Use browser_navigate instead."
             closed_page = pages.pop(idx)
             await closed_page.close()
-            entry["active_page_idx"] = min(entry["active_page_idx"], len(pages) - 1)
+            entry["active_page_idx"] = max(0, idx - 1)
             return f"✅ Closed tab [{idx}]. Active tab is now [{entry['active_page_idx']}]."
 
         return f"❌ Unknown action '{action}'. Use: list, new, switch, close."
     except Exception as e:
         return f"Tab management failed: {type(e).__name__} - {str(e)}"
+
+
+@tool
+async def browser_close_current_tab(
+    config: RunnableConfig = None,
+) -> str:
+    """
+    Close the active tab and return focus to the previous tab in the stack.
+    """
+    thread_id = _get_thread_id(config)
+    try:
+        entry = await BrowserSessionManager.get_entry(thread_id)
+        pages = entry["pages"]
+
+        if len(pages) <= 1:
+            return "Error: Cannot close the only open tab."
+
+        idx = entry["active_page_idx"]
+        current_page = pages.pop(idx)
+        await current_page.close()
+
+        entry["active_page_idx"] = max(0, idx - 1)
+        entry["just_opened_new_tab"] = False
+        active_page = pages[entry["active_page_idx"]]
+        title = await active_page.title()
+        return (
+            "Action successful: Closed current tab. "
+            f"Focus returned to previous page ({title})."
+        )
+    except Exception as e:
+        return f"Failed to close current tab: {type(e).__name__} - {str(e)}"
 
 
 # ══════════════════════════════════════════════════════════════
@@ -555,7 +762,8 @@ async def browser_click(
     """
     thread_id = _get_thread_id(config)
     try:
-        page = await BrowserSessionManager.get_page(thread_id)
+        entry = await BrowserSessionManager.get_entry(thread_id)
+        page = entry["pages"][entry["active_page_idx"]]
         if page.url == "about:blank":
             return "No page is currently loaded. Use browser_navigate first."
 
@@ -568,19 +776,19 @@ async def browser_click(
         async def _click_css() -> str:
             await page.click(selector, **click_kwargs)
             await page.wait_for_load_state("domcontentloaded", timeout=10000)
-            return f"✅ Clicked `{selector}`. Page: **{await page.title()}** ({page.url})"
+            return f"clicked `{selector}`."
 
         async def _click_text() -> str:
             locator = page.get_by_text(selector, exact=False).first
             await locator.click(**click_kwargs)
             await page.wait_for_load_state("domcontentloaded", timeout=10000)
-            return f"✅ Clicked text '{selector}'. Page: **{await page.title()}** ({page.url})"
+            return f"clicked text '{selector}'."
 
         async def _click_role(role: str) -> str:
             locator = page.get_by_role(role, name=selector).first
             await locator.click(**click_kwargs)
             await page.wait_for_load_state("domcontentloaded", timeout=10000)
-            return f"✅ Clicked {role} '{selector}'. Page: **{await page.title()}** ({page.url})"
+            return f"clicked {role} '{selector}'."
 
         strategies = [
             ("css", _click_css),
@@ -598,7 +806,15 @@ async def browser_click(
                 _log_strategy_failure("browser_click", strategy_name, selector, e)
 
         if not summary:
-            return f"❌ Could not find element matching '{selector}'. Try browser_snapshot to inspect the page."
+            return f"❌ Could not find element matching '{selector}'."
+
+        # Allow context-level "page" event to register and focus the new tab.
+        await asyncio.sleep(1.0)
+        if await BrowserSessionManager.pop_new_tab_notice(thread_id):
+            return (
+                f"Action successful: {summary} "
+                "[SYSTEM NOTICE: A new tab opened and was automatically focused.]"
+            )
 
         return f"Action successful: {summary}"
     except Exception as e:
@@ -642,7 +858,7 @@ async def browser_type(
                 _log_strategy_failure("browser_type", strategy_name, selector, e)
 
         if not filled:
-            return f"❌ Could not find input matching '{selector}'. Try browser_snapshot to inspect the page."
+            return f"❌ Could not find input matching '{selector}'."
 
         summary = f"typed into `{selector}`"
         if submit:
@@ -789,7 +1005,7 @@ async def browser_hover(
                 _log_strategy_failure("browser_hover", strategy_name, selector, e)
 
         if not summary:
-            return f"❌ Could not find element matching '{selector}'. Try browser_snapshot to inspect the page."
+            return f"❌ Could not find element matching '{selector}'."
 
         return f"Action successful: {summary}"
     except Exception as e:
@@ -869,7 +1085,7 @@ async def browser_file_upload(
 
 
 # ══════════════════════════════════════════════════════════════
-# Tool Registry — 16 tools total
+# Tool Registry — 17 tools total
 # ══════════════════════════════════════════════════════════════
 
 TOOL_REGISTRY: Dict[str, Any] = {
@@ -881,6 +1097,7 @@ TOOL_REGISTRY: Dict[str, Any] = {
     "browser_scroll": browser_scroll,
     "browser_wait_for": browser_wait_for,
     "browser_snapshot": browser_snapshot,
+    "browser_close_current_tab": browser_close_current_tab,
     "browser_tab_management": browser_tab_management,
     # Write Tools (HITL-gated)
     "browser_click": browser_click,

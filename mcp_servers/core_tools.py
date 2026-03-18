@@ -367,6 +367,56 @@ async def cancel_task(job_id: str) -> str:
         return f"❌ Failed to cancel task: {str(e)}"
 
 
+@tool
+async def cancel_all_scheduled_tasks() -> str:
+    """
+    Cancel and remove all scheduled background tasks.
+
+    Returns:
+        str: Summary of cancelled jobs and any failures.
+    """
+    try:
+        from core.scheduler import get_scheduler
+
+        scheduler = await get_scheduler()
+        jobs = scheduler.list_jobs()
+
+        if not jobs:
+            return "No scheduled tasks currently."
+
+        cancelled: list[str] = []
+        failed: list[str] = []
+
+        for job in jobs:
+            job_id = str(job.get("id", "")).strip()
+            if not job_id:
+                continue
+
+            try:
+                if scheduler.cancel_job(job_id):
+                    cancelled.append(job_id)
+                else:
+                    failed.append(job_id)
+            except Exception as cancel_error:
+                failed.append(f"{job_id} ({cancel_error})")
+
+        if not cancelled and failed:
+            return "❌ Failed to cancel scheduled tasks:\n" + "\n".join([f"- {item}" for item in failed])
+
+        response_lines = [
+            f"✅ Cancelled {len(cancelled)} scheduled task(s).",
+        ]
+        if cancelled:
+            response_lines.append("Cancelled IDs: " + ", ".join(cancelled))
+        if failed:
+            response_lines.append("⚠️ Failed IDs: " + ", ".join(failed))
+
+        return "\n".join(response_lines)
+    except Exception as e:
+        logger.error(f"cancel_all_scheduled_tasks failed: {e}")
+        return f"❌ Failed to cancel all scheduled tasks: {str(e)}"
+
+
 # Register tools so they are dynamically loaded by the GLOBAL_TOOL_REGISTRY in __init__.py
 TOOL_REGISTRY = {
     "save_to_long_term_memory": save_to_long_term_memory,
@@ -377,5 +427,6 @@ TOOL_REGISTRY = {
     "send_user_notification": send_user_notification,
     "list_scheduled_tasks": list_scheduled_tasks,
     "cancel_task": cancel_task,
+    "cancel_all_scheduled_tasks": cancel_all_scheduled_tasks,
 }
 

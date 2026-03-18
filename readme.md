@@ -223,9 +223,33 @@ Health check:
 curl http://127.0.0.1:8000/health
 ```
 
-## Model switching
+## Chat commands tutorial
 
-Per-thread model hot swap is supported with `/model`:
+EnterpriseClaw supports thread-scoped slash commands in Telegram, Web chat, and CLI.
+These commands only affect the current thread/session unless noted otherwise.
+
+### 1) List configured model providers
+
+Use:
+
+```text
+/models
+```
+
+What it does:
+
+- Shows which providers are currently configured from your environment.
+- Typical values: `openai`, `google`, `claude`, `lm_studio`.
+
+### 2) Switch the active model for this thread
+
+Use:
+
+```text
+/model <provider/model>
+```
+
+Examples:
 
 ```text
 /model lmstudio/qwen/qwen3.5
@@ -234,12 +258,75 @@ Per-thread model hot swap is supported with `/model`:
 /model anthropic/claude-3-5-sonnet-20241022
 ```
 
-Useful commands:
+What it does:
 
-- `/models`: list configured providers.
-- `/permit <tool_name>`: allow a normally gated tool for this thread.
-- `/deny <tool_name>`: force approval for an auto-allowed tool.
-- `/tools`: show tool policy state for this thread.
+- Hot-swaps the model used for subsequent turns in this thread.
+
+### 3) Inspect tool permission policy
+
+Use:
+
+```text
+/tools
+```
+
+What it does:
+
+- Displays tool policy for the current thread, including autonomous, allowed, permitted, and approval-required tools.
+
+### 4) Override tool approval behavior
+
+Use:
+
+```text
+/permit <tool_name>
+/deny <tool_name>
+```
+
+Examples:
+
+```text
+/permit browser_click
+/deny exec_command
+```
+
+What it does:
+
+- `/permit`: marks a tool as auto-approved for this thread.
+- `/deny`: forces approval for that tool in this thread.
+
+### 5) Manage scheduled jobs with `/cron`
+
+Use:
+
+```text
+/cron
+/cron list
+/cron cancel <job_id>
+/cron cancel all
+/cron cancel-all
+/cron help
+```
+
+What it does:
+
+- `/cron` or `/cron list`: lists all scheduled jobs.
+- `/cron cancel <job_id>`: cancels one scheduled job.
+- `/cron cancel all` or `/cron cancel-all`: cancels every scheduled job.
+- `/cron help`: shows quick cron command help.
+
+To create tasks, use natural-language requests such as:
+
+- "Schedule a background task to check AI engineer jobs every day at 9 AM."
+- "Cancel all scheduled cron jobs."
+
+Scheduler tools behind the scenes: `schedule_background_task`, `list_scheduled_tasks`, `cancel_task`.
+
+### Command tips
+
+- Slash commands are case-insensitive (`/MODELS` works too).
+- Commands that need arguments must include them (for example `/model <provider/model>`).
+- Use `/tools` first if you are not sure what tool name to pass to `/permit` or `/deny`.
 
 ## API surface
 

@@ -25,6 +25,7 @@ AUTONOMOUS_TOOLS = {
     "web_search", "web_fetch",
     "save_to_long_term_memory",
     "browser_get_text", "browser_screenshot", "browser_snapshot",
+    "browser_close_current_tab",
     "browser_go_back", "browser_scroll", "browser_wait_for",
     "browser_tab_management",
     "escalate_to_supervisor",
@@ -34,15 +35,16 @@ AUTONOMOUS_TOOLS = {
 ALLOWED_TOOLS = {
     "delegate_task",
     "browser_navigate",
+     "browser_click", "browser_type", "browser_execute_js",
+    "browser_select_option", "browser_press_key", "browser_hover",
+    "browser_handle_dialog", "browser_file_upload","batch_actions",
 }
 
 # Tier 3: NOT_ALLOWED — always require explicit HITL approval
 NOT_ALLOWED_TOOLS = {
-    "browser_click", "browser_type", "browser_execute_js",
-    "browser_select_option", "browser_press_key", "browser_hover",
-    "browser_handle_dialog", "browser_file_upload",
+   
     "exec_command", "write_file", "delete_file",
-    "batch_actions",
+    
 }
 
 

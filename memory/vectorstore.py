@@ -331,9 +331,6 @@ class ZvecMemoryStore:
                     raw_tools = cache_entry.get("tools") or []
                     if isinstance(raw_tools, list):
                         declared_tools_raw = raw_tools
-                elif cache_entry:
-                    # Backward-compat path for existing tests/cache stubs.
-                    cached_content = str(cache_entry).strip()
 
                 if cached_content:
                     normalized_declared_tools: list[str] = []

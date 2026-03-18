@@ -150,6 +150,122 @@ def _observation_to_prompt_text(observation: Any) -> str:
     return text or "No environment state available yet."
 
 
+def _extract_tool_call_ids(tool_calls: list[Any]) -> list[str]:
+    """Return normalized tool_call ids from AIMessage.tool_calls payloads."""
+    ids: list[str] = []
+    for tool_call in tool_calls:
+        call_id = None
+        if isinstance(tool_call, dict):
+            call_id = tool_call.get("id")
+        else:
+            call_id = getattr(tool_call, "id", None)
+
+        if isinstance(call_id, str):
+            value = call_id.strip()
+            if value and value not in ids:
+                ids.append(value)
+    return ids
+
+
+def _coerce_valid_worker_history(messages: list[Any]) -> list[Any]:
+    """
+    Drop malformed tool-history patterns before an LLM call.
+
+    Guarantees:
+    - No orphan ToolMessage entries.
+    - Any AI tool_calls block is kept only if all expected tool_call_ids are present.
+    """
+    non_system = [m for m in messages if not isinstance(m, SystemMessage)]
+    valid: list[Any] = []
+
+    i = 0
+    while i < len(non_system):
+        msg = non_system[i]
+
+        if isinstance(msg, ToolMessage):
+            i += 1
+            continue
+
+        if isinstance(msg, AIMessage):
+            tool_calls = list(getattr(msg, "tool_calls", []) or [])
+            if tool_calls:
+                j = i + 1
+                following_tools: list[ToolMessage] = []
+                while j < len(non_system) and isinstance(non_system[j], ToolMessage):
+                    following_tools.append(non_system[j])
+                    j += 1
+
+                expected_ids = _extract_tool_call_ids(tool_calls)
+                matched_tools: list[ToolMessage] = []
+                matched_ids: set[str] = set()
+
+                for tool_msg in following_tools:
+                    tool_call_id = getattr(tool_msg, "tool_call_id", None)
+                    if (
+                        isinstance(tool_call_id, str)
+                        and tool_call_id in expected_ids
+                        and tool_call_id not in matched_ids
+                    ):
+                        matched_tools.append(tool_msg)
+                        matched_ids.add(tool_call_id)
+
+                if expected_ids and all(call_id in matched_ids for call_id in expected_ids):
+                    valid.append(msg)
+                    valid.extend(matched_tools)
+                elif not expected_ids and str(getattr(msg, "content", "")).strip():
+                    # Defensive fallback: retain text response if tool_call ids are absent.
+                    valid.append(msg)
+
+                i = j
+                continue
+
+        valid.append(msg)
+        i += 1
+
+    return valid
+
+
+def _build_worker_history_tail(messages: list[Any], max_messages: int = 10) -> list[Any]:
+    """Build a pair-safe worker history tail that never starts with a ToolMessage."""
+    valid_history = _coerce_valid_worker_history(messages)
+    if not valid_history:
+        return []
+
+    segments: list[list[Any]] = []
+    i = 0
+    while i < len(valid_history):
+        msg = valid_history[i]
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", []):
+            segment: list[Any] = [msg]
+            i += 1
+            while i < len(valid_history) and isinstance(valid_history[i], ToolMessage):
+                segment.append(valid_history[i])
+                i += 1
+            segments.append(segment)
+            continue
+
+        segments.append([msg])
+        i += 1
+
+    selected: list[Any] = []
+    count = 0
+    for segment in reversed(segments):
+        if count + len(segment) > max_messages and selected:
+            break
+        if len(segment) > max_messages and not selected:
+            selected = segment[:]
+            count = len(segment)
+            break
+
+        selected = segment + selected
+        count += len(segment)
+
+    while selected and isinstance(selected[0], ToolMessage):
+        selected = selected[1:]
+
+    return selected
+
+
 def _tool_category(tool_name: str) -> str:
     """Resolve normalized runtime category for a tool."""
     metadata = GLOBAL_TOOL_METADATA.get(tool_name, {})
@@ -346,8 +462,6 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
         "- Combine skills only when the objective requires a cross-domain handoff.\n\n"
         f"## Your Objective\n{objective}\n\n"
         f"## Progress\n- Step {step_count + 1} of {max_steps}\n\n"
-        f"## Current Environment State\n"
-        f"```\n{observation}\n```\n\n"
         f"## Rules\n"
         f"- Take the NEXT action to accomplish your objective.\n"
         f"{batch_actions_hint}"
@@ -363,15 +477,21 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
     )
 
     sys_msg = SystemMessage(content=system_prompt, id="worker_system_msg")
-    objective_msg = HumanMessage(content=f"Objective: {objective}", id="worker_objective_msg")
+    observation_header = "## Current Environment State\n"
+    if isinstance(observation_raw, list):
+        # Multimodal observations must be sent in a HumanMessage, not a SystemMessage.
+        observation_payload: list[dict[str, Any] | str] = [{"type": "text", "text": observation_header}]
+        observation_payload.extend(observation_raw)
+        observation_msg = HumanMessage(content=observation_payload, id="worker_observation_msg")
+    else:
+        observation_msg = HumanMessage(
+            content=f"{observation_header}```\n{observation}\n```",
+            id="worker_observation_msg",
+        )
 
-    # Worker keeps a lightweight message tail — no complex pruning needed
+    # Worker keeps a lightweight, pair-safe message tail.
     messages = state.get("messages", [])
-    # Filter out old system messages
-    history = [m for m in messages if not isinstance(m, SystemMessage)]
-    # Keep only last 10 messages (action log is tiny)
-    if len(history) > 10:
-        history = history[-10:]
+    history = _build_worker_history_tail(messages, max_messages=10)
 
     logger.info("🌀"*80)
     logger.info("🌀 [WORKER TRACE: PROMPT]")
@@ -383,7 +503,7 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
     logger.info("🌀"*80)
 
     return {
-        "_formatted_prompt": [sys_msg, objective_msg] + history,
+        "_formatted_prompt": [sys_msg] + history + [observation_msg],
         "step_count": step_count + 1,
     }
 

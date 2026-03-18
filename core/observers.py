@@ -40,7 +40,12 @@ async def get_browser_environment_state(config: RunnableConfig = None) -> str | 
 
     try:
         context = await get_current_page_context(config)
-        indexed_state = await get_interactive_element_index(config=config, max_elements=80)
+        multimodal_enabled = _is_multimodal_observation_enabled(config)
+        indexed_state = await get_interactive_element_index(
+            config=config,
+            max_elements=80,
+            annotate_dom=multimodal_enabled,
+        )
         element_lines: list[str] = []
         for item in indexed_state.get("elements", []) or []:
             idx = item.get("index", "?")
@@ -63,7 +68,7 @@ async def get_browser_environment_state(config: RunnableConfig = None) -> str | 
             f"Interactive Elements:\n{element_map}"
         )
 
-        if _is_multimodal_observation_enabled(config):
+        if multimodal_enabled:
             screenshot_payload = await browser_screenshot.ainvoke({}, config=config)
             image_block = _coerce_image_block(screenshot_payload)
             if image_block:

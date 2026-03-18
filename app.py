@@ -47,6 +47,27 @@ async def _handle_commands(chat_id: str, text: str, platform: str) -> bool:
     parts = text.split()
     cmd = parts[0].lower()
 
+    async def _invoke_registry_tool(tool_name: str, args: dict | None = None) -> str:
+        from mcp_servers import GLOBAL_TOOL_REGISTRY
+        import inspect
+
+        func = GLOBAL_TOOL_REGISTRY.get(tool_name)
+        if not func:
+            return f"❌ Tool `{tool_name}` is not available."
+
+        payload = args or {}
+        if hasattr(func, "ainvoke"):
+            result = await func.ainvoke(
+                payload,
+                config={"configurable": {"thread_id": str(chat_id), "platform": platform}},
+            )
+        else:
+            result = func(**payload)
+            if inspect.isawaitable(result):
+                result = await result
+
+        return str(result)
+
     if cmd == "/model" and len(parts) > 1:
         await graph.aupdate_state({"configurable": {"thread_id": chat_id}}, {"active_model": parts[1]})
         await channel_manager.send_message(platform, chat_id, f"🔄 Brain swapped! Now using: `{parts[1]}`")
@@ -128,6 +149,69 @@ async def _handle_commands(chat_id: str, text: str, platform: str) -> bool:
             final_msg = "No models available."
 
         await channel_manager.send_message(platform, chat_id, final_msg)
+        return True
+
+    if cmd == "/cron":
+        subcommand = parts[1].lower() if len(parts) > 1 else "list"
+
+        if subcommand in {"help", "h", "?"}:
+            help_text = (
+                "📅 **Cron Commands**\n"
+                "- `/cron` or `/cron list` — list scheduled tasks\n"
+                "- `/cron cancel <job_id>` — cancel one scheduled task\n\n"
+                "- `/cron cancel all` or `/cron cancel-all` — cancel all scheduled tasks\n\n"
+                "To create tasks, use natural language, for example:\n"
+                "\"Schedule a background task to check AI jobs daily at 9 AM.\""
+            )
+            await channel_manager.send_message(platform, chat_id, help_text)
+            return True
+
+        if subcommand in {"list", "ls"}:
+            try:
+                result = await _invoke_registry_tool("list_scheduled_tasks")
+                await channel_manager.send_message(platform, chat_id, result)
+            except Exception as e:
+                await channel_manager.send_message(platform, chat_id, f"❌ Failed to list cron jobs: {e}")
+            return True
+
+        if subcommand in {"cancel-all", "clear", "wipe", "purge"}:
+            try:
+                result = await _invoke_registry_tool("cancel_all_scheduled_tasks")
+                await channel_manager.send_message(platform, chat_id, result)
+            except Exception as e:
+                await channel_manager.send_message(platform, chat_id, f"❌ Failed to cancel all cron jobs: {e}")
+            return True
+
+        if subcommand in {"cancel", "remove", "rm", "delete"}:
+            if len(parts) < 3:
+                await channel_manager.send_message(
+                    platform,
+                    chat_id,
+                    "Usage: `/cron cancel <job_id>` or `/cron cancel all`",
+                )
+                return True
+
+            job_id = parts[2].strip()
+            if job_id.lower() in {"all", "*"}:
+                try:
+                    result = await _invoke_registry_tool("cancel_all_scheduled_tasks")
+                    await channel_manager.send_message(platform, chat_id, result)
+                except Exception as e:
+                    await channel_manager.send_message(platform, chat_id, f"❌ Failed to cancel all cron jobs: {e}")
+                return True
+
+            try:
+                result = await _invoke_registry_tool("cancel_task", {"job_id": job_id})
+                await channel_manager.send_message(platform, chat_id, result)
+            except Exception as e:
+                await channel_manager.send_message(platform, chat_id, f"❌ Failed to cancel cron job: {e}")
+            return True
+
+        await channel_manager.send_message(
+            platform,
+            chat_id,
+            "Unknown `/cron` command. Use `/cron help`.",
+        )
         return True
 
     return False
@@ -457,8 +541,15 @@ async def _poll_telegram():
                     logger.warning(f"⚠️ Ignored message from unauthorized chat_id: {chat_id}")
                     continue
 
+                if isinstance(text, list):
+                    text_preview = "[multimodal payload]"
+                else:
+                    text_preview = str(text).replace("\n", " ")[:120]
+                logger.info("📨 Telegram inbound message chat_id=%s text=%s", chat_id, text_preview)
+
                 # ── Handle Commands (e.g. /model) ──────────────────────────
                 if await _handle_commands(str(chat_id), text, "telegram"):
+                    logger.info("📨 Telegram command handled for chat_id=%s", chat_id)
                     continue
 
                 # Show typing indicator
@@ -781,4 +872,6 @@ if __name__ == "__main__":
         asyncio.run(run_cli())
     else:
         import uvicorn
-        uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+        reload_enabled = "--reload" in sys.argv
+        logger.info("Starting API server (reload=%s)", reload_enabled)
+        uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=reload_enabled)

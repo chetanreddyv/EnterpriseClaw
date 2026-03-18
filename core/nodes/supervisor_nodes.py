@@ -33,6 +33,9 @@ IDENTITY_FILE = Path(__file__).parent.parent.parent / "skills" / "identity" / "s
 SUPERVISOR_TOOLS = {
     "web_search", "web_fetch",
     "save_to_long_term_memory",
+    "list_scheduled_tasks",
+    "cancel_task",
+    "cancel_all_scheduled_tasks",
     "delegate_task",
 }
 
@@ -151,6 +154,9 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
     rules_lines = [
         "## Rules",
         "- You are in LIVE mode and TOOL CALLING IS ENABLED.",
+        "- If the user asks to list cron jobs, scheduled jobs, or scheduled tasks, call `list_scheduled_tasks` directly.",
+        "- If the user asks to cancel all cron/scheduled jobs, call `cancel_all_scheduled_tasks` directly.",
+        "- If the user asks to cancel one scheduled job and provides a job id, call `cancel_task(job_id=...)`.",
         "- Delegate complex tasks via `delegate_task(objective='...')` with a focused objective.",
         "- Example: delegate_task(objective='Navigate LinkedIn, find the hiring manager, and email my resume summary').",
         "- If Worker escalation occurs, do not re-delegate the same unchanged objective.",
