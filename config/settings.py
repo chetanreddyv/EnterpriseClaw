@@ -62,6 +62,12 @@ class Settings(BaseSettings):
         description="Global toggle for HITL approval gates. When False, all tools are auto-approved.",
     )
 
+    # ── Browser Observations ──────────────────────────────────
+    enable_multimodal_observation: bool = Field(
+        default=True,
+        description="Enable multimodal observations (browser screenshots) in Worker environment state.",
+    )
+
     # ── Default Model ────────────────────────────────────────
     default_model: str = Field(
         default="openai/gpt-5.4-mini",

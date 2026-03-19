@@ -420,6 +420,7 @@ class SystemScheduler:
                     "thread_id": session_id,
                     "platform": "system",
                     "execution_mode": "cron",
+                    "enable_multimodal_observation": settings.enable_multimodal_observation,
                 },
                 "recursion_limit": 50,
             }

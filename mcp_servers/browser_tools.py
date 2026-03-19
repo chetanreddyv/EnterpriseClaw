@@ -46,6 +46,23 @@ def _log_strategy_failure(tool_name: str, strategy: str, selector: str, error: E
     )
 
 
+async def _wait_for_page_settle(page, include_networkidle: bool = True, settle_seconds: float = 0.3) -> None:
+    """Best-effort wait for SPA updates to settle before reading page state."""
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=1500)
+    except Exception:
+        pass
+
+    if include_networkidle:
+        try:
+            await page.wait_for_load_state("networkidle", timeout=1500)
+        except Exception:
+            pass
+
+    if settle_seconds > 0:
+        await asyncio.sleep(min(max(settle_seconds, 0.05), 1.0))
+
+
 async def get_current_page_context(config: RunnableConfig = None) -> dict[str, str]:
     """Return URL and title breadcrumbs for the active page."""
     thread_id = _get_thread_id(config)
@@ -73,7 +90,30 @@ async def get_interactive_element_index(
         }
 
     snapshot_js = r"""
-    (maxElements, annotateDom, idAttr) => {
+    ([maxElements, annotateDom, idAttr]) => {
+        const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+        const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+
+        const interactiveRoles = new Set([
+            'button',
+            'link',
+            'menuitem',
+            'tab',
+            'checkbox',
+            'radio',
+            'switch',
+            'textbox',
+            'combobox',
+            'option',
+            'spinbutton',
+            'slider',
+        ]);
+
+        const parseOpacity = (value) => {
+            const parsed = Number.parseFloat(value);
+            return Number.isFinite(parsed) ? parsed : 1;
+        };
+
         const pickText = (el) => {
             const aria = el.getAttribute('aria-label') || '';
             const placeholder = el.getAttribute('placeholder') || '';
@@ -83,14 +123,19 @@ async def get_interactive_element_index(
 
         const isVisible = (el) => {
             const style = window.getComputedStyle(el);
-            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+            if (style.display === 'none' || style.visibility === 'hidden' || parseOpacity(style.opacity) <= 0.05) {
                 return false;
             }
             const rect = el.getBoundingClientRect();
             if (rect.width <= 0 || rect.height <= 0) {
                 return false;
             }
-            if (rect.bottom < 0 || rect.top > (window.innerHeight || document.documentElement.clientHeight)) {
+            if (
+                rect.bottom < 0 ||
+                rect.top > viewportHeight ||
+                rect.right < 0 ||
+                rect.left > viewportWidth
+            ) {
                 return false;
             }
             return true;
@@ -101,17 +146,71 @@ async def get_interactive_element_index(
             if (['a', 'button', 'input', 'select', 'textarea', 'summary'].includes(tag)) {
                 return true;
             }
-            if (el.getAttribute('role')) {
+            const role = (el.getAttribute('role') || '').trim().toLowerCase();
+            if (role && interactiveRoles.has(role)) {
                 return true;
             }
+
+            const tabindex = el.getAttribute('tabindex');
+            if (tabindex !== null) {
+                const tabIndexNum = Number.parseInt(tabindex, 10);
+                if (!Number.isNaN(tabIndexNum) && tabIndexNum >= 0) {
+                    return true;
+                }
+            }
+
+            if (el.hasAttribute('contenteditable')) {
+                const contentEditable = (el.getAttribute('contenteditable') || '').trim().toLowerCase();
+                if (contentEditable === '' || contentEditable === 'true') {
+                    return true;
+                }
+            }
+
+            if (el.getAttribute('aria-haspopup')) {
+                return true;
+            }
+
             if (el.hasAttribute('onclick') || el.hasAttribute('href')) {
                 return true;
             }
             return false;
         };
 
+        const scoreCandidate = (tag, role, typeAttr, text, rect) => {
+            let score = 0;
+            if (tag === 'button') score += 6;
+            if (tag === 'a') score += 4;
+            if (tag === 'input') {
+                if (['submit', 'button', 'image', 'checkbox', 'radio'].includes(typeAttr)) {
+                    score += 5;
+                } else {
+                    score += 2;
+                }
+            }
+            if (['button', 'link', 'menuitem', 'tab'].includes(role)) score += 3;
+            if (text) score += text.length <= 48 ? 2 : 1;
+
+            const area = Math.max(1, rect.width * rect.height);
+            if (area >= 12000) score += 2;
+            else if (area >= 3000) score += 1;
+            return score;
+        };
+
         const attrsToKeep = ['href', 'type', 'name', 'placeholder', 'id', 'role'];
-        const selectors = 'a, button, input, select, textarea, summary, [role], [onclick], [href]';
+        const selectors = [
+            'a',
+            'button',
+            'input',
+            'select',
+            'textarea',
+            'summary',
+            '[role]',
+            '[onclick]',
+            '[href]',
+            '[tabindex]:not([tabindex="-1"])',
+            '[contenteditable="true"]',
+            '[aria-haspopup]'
+        ].join(', ');
         const nodes = Array.from(document.querySelectorAll(selectors));
 
         if (annotateDom) {
@@ -119,14 +218,14 @@ async def get_interactive_element_index(
         }
 
         const seen = new Set();
-        const elements = [];
-        let nextId = 1;
+        const candidates = [];
 
         for (const el of nodes) {
-            if (elements.length >= maxElements) break;
             if (!isInteractive(el) || !isVisible(el)) continue;
 
             const tag = el.tagName.toLowerCase();
+            const role = (el.getAttribute('role') || '').trim().toLowerCase();
+            const typeAttr = (el.getAttribute('type') || '').trim().toLowerCase();
             const rect = el.getBoundingClientRect();
             const attrs = [];
             for (const attrName of attrsToKeep) {
@@ -137,19 +236,78 @@ async def get_interactive_element_index(
             }
 
             const text = pickText(el).slice(0, 90);
-            const signature = `${tag}|${attrs.join('|')}|${text}|${Math.round(rect.left)}|${Math.round(rect.top)}|${Math.round(rect.width)}|${Math.round(rect.height)}`;
+            const signature = `${tag}|${role}|${attrs.join('|')}|${text}|${Math.round(rect.left)}|${Math.round(rect.top)}|${Math.round(rect.width)}|${Math.round(rect.height)}`;
             if (seen.has(signature)) continue;
             seen.add(signature);
 
+            const centerX = rect.left + rect.width / 2;
+            let bucket = 'center';
+            if (centerX < viewportWidth * 0.34) {
+                bucket = 'left';
+            } else if (centerX > viewportWidth * 0.66) {
+                bucket = 'right';
+            }
+
+            candidates.push({
+                el,
+                tag,
+                attrs,
+                text,
+                bucket,
+                score: scoreCandidate(tag, role, typeAttr, text, rect),
+                top: rect.top,
+                left: rect.left,
+            });
+        }
+
+        const targetCount = Math.min(maxElements, candidates.length);
+        if (!targetCount) {
+            return [];
+        }
+
+        const buckets = { right: [], center: [], left: [] };
+        for (const candidate of candidates) {
+            buckets[candidate.bucket].push(candidate);
+        }
+
+        for (const name of Object.keys(buckets)) {
+            buckets[name].sort((a, b) => {
+                if (b.score !== a.score) return b.score - a.score;
+                if (a.top !== b.top) return a.top - b.top;
+                return a.left - b.left;
+            });
+        }
+
+        const selected = [];
+        const cursors = { right: 0, center: 0, left: 0 };
+        const bucketOrder = ['right', 'center', 'left'];
+
+        while (selected.length < targetCount) {
+            let progressed = false;
+            for (const bucketName of bucketOrder) {
+                const cursor = cursors[bucketName];
+                const bucketItems = buckets[bucketName];
+                if (cursor >= bucketItems.length) continue;
+                selected.push(bucketItems[cursor]);
+                cursors[bucketName] = cursor + 1;
+                progressed = true;
+                if (selected.length >= targetCount) break;
+            }
+            if (!progressed) break;
+        }
+
+        const elements = [];
+        let nextId = 1;
+        for (const candidate of selected) {
             if (annotateDom) {
-                el.setAttribute(idAttr, String(nextId));
+                candidate.el.setAttribute(idAttr, String(nextId));
             }
 
             elements.push({
                 index: nextId,
-                tag,
-                attrs,
-                text,
+                tag: candidate.tag,
+                attrs: candidate.attrs,
+                text: candidate.text,
             });
             nextId += 1;
         }
@@ -160,9 +318,11 @@ async def get_interactive_element_index(
 
     elements = await page.evaluate(
         snapshot_js,
-        max(10, min(max_elements, 200)),
-        bool(annotate_dom),
-        SOM_ID_ATTR,
+        [
+            max(10, min(max_elements, 200)),
+            bool(annotate_dom),
+            SOM_ID_ATTR,
+        ],
     )
     context = await get_current_page_context(config)
     return {
@@ -175,7 +335,7 @@ async def get_interactive_element_index(
 async def _inject_som_overlay(page) -> int:
     """Draw temporary numbered overlays for currently annotated interactive elements."""
     overlay_js = r"""
-    (idAttr, overlayId, prevOutlineAttr) => {
+    ([idAttr, overlayId, prevOutlineAttr]) => {
         const staleOverlay = document.getElementById(overlayId);
         if (staleOverlay) staleOverlay.remove();
         document.querySelectorAll('.claw-som-label').forEach((node) => node.remove());
@@ -238,13 +398,18 @@ async def _inject_som_overlay(page) -> int:
     }
     """
 
-    return int(await page.evaluate(overlay_js, SOM_ID_ATTR, SOM_OVERLAY_ID, SOM_PREV_OUTLINE_ATTR))
+    return int(
+        await page.evaluate(
+            overlay_js,
+            [SOM_ID_ATTR, SOM_OVERLAY_ID, SOM_PREV_OUTLINE_ATTR],
+        )
+    )
 
 
 async def _cleanup_som_overlay(page) -> None:
     """Remove temporary Set-of-Marks overlays and attributes from the DOM."""
     cleanup_js = r"""
-    (idAttr, overlayId, prevOutlineAttr) => {
+    ([idAttr, overlayId, prevOutlineAttr]) => {
         const overlay = document.getElementById(overlayId);
         if (overlay) overlay.remove();
         document.querySelectorAll('.claw-som-label').forEach((node) => node.remove());
@@ -262,7 +427,10 @@ async def _cleanup_som_overlay(page) -> None:
     }
     """
 
-    await page.evaluate(cleanup_js, SOM_ID_ATTR, SOM_OVERLAY_ID, SOM_PREV_OUTLINE_ATTR)
+    await page.evaluate(
+        cleanup_js,
+        [SOM_ID_ATTR, SOM_OVERLAY_ID, SOM_PREV_OUTLINE_ATTR],
+    )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -479,6 +647,7 @@ async def browser_navigate(
     try:
         page = await BrowserSessionManager.get_page(thread_id)
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await _wait_for_page_settle(page, include_networkidle=True, settle_seconds=0.15)
         title = await page.title()
         return f"Action successful: navigated to {url}. Current page: {title} ({page.url})"
     except Exception as e:
@@ -518,6 +687,8 @@ async def browser_screenshot(
         page = await BrowserSessionManager.get_page(thread_id)
         if page.url == "about:blank":
             return "No page is currently loaded. Use browser_navigate first."
+
+        await _wait_for_page_settle(page, include_networkidle=True, settle_seconds=0.25)
 
         marker_count = await page.evaluate(
             "(idAttr) => document.querySelectorAll(`[${idAttr}]`).length",
@@ -624,6 +795,8 @@ async def browser_snapshot(
         page = await BrowserSessionManager.get_page(_get_thread_id(config))
         if page.url == "about:blank":
             return "No page is currently loaded. Use browser_navigate first."
+
+        await _wait_for_page_settle(page, include_networkidle=True, settle_seconds=0.2)
 
         snapshot = await get_interactive_element_index(config=config, max_elements=max_elements)
         elements = snapshot.get("elements", [])
@@ -775,19 +948,19 @@ async def browser_click(
 
         async def _click_css() -> str:
             await page.click(selector, **click_kwargs)
-            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            await _wait_for_page_settle(page, include_networkidle=True, settle_seconds=0.25)
             return f"clicked `{selector}`."
 
         async def _click_text() -> str:
             locator = page.get_by_text(selector, exact=False).first
             await locator.click(**click_kwargs)
-            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            await _wait_for_page_settle(page, include_networkidle=True, settle_seconds=0.25)
             return f"clicked text '{selector}'."
 
         async def _click_role(role: str) -> str:
             locator = page.get_by_role(role, name=selector).first
             await locator.click(**click_kwargs)
-            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            await _wait_for_page_settle(page, include_networkidle=True, settle_seconds=0.25)
             return f"clicked {role} '{selector}'."
 
         strategies = [
@@ -863,7 +1036,7 @@ async def browser_type(
         summary = f"typed into `{selector}`"
         if submit:
             await page.keyboard.press("Enter")
-            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            await _wait_for_page_settle(page, include_networkidle=True, settle_seconds=0.25)
             summary += " and submitted"
 
         return f"Action successful: {summary}."
@@ -934,6 +1107,8 @@ async def browser_select_option(
 
         if not summary:
             return f"❌ Could not select '{value}' in `{selector}`. Verify the selector and available options."
+
+        await _wait_for_page_settle(page, include_networkidle=True, settle_seconds=0.2)
 
         return f"Action successful: {summary}"
     except Exception as e:

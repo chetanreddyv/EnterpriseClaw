@@ -510,8 +510,15 @@ async def direct_agent_invoke(chat_id: str, text: str, platform: str, user_name:
     if await _handle_commands(chat_id, text, platform):
         return
     from memory.retrieval import memory_retrieval
+    from config.settings import settings
     
-    config = {"configurable": {"thread_id": str(chat_id), "platform": platform}}
+    config = {
+        "configurable": {
+            "thread_id": str(chat_id),
+            "platform": platform,
+            "enable_multimodal_observation": settings.enable_multimodal_observation,
+        }
+    }
 
     try:
         # 🚨 Intercept messages while graph is interrupted (HITL Deadlock Fix)
@@ -614,7 +621,14 @@ async def direct_agent_invoke(chat_id: str, text: str, platform: str, user_name:
 async def direct_resume_invoke(chat_id: str, decision: str, platform: str) -> dict:
     """Resumes the LangGraph state machine after a HITL approval."""
     from memory.retrieval import memory_retrieval
-    config = {"configurable": {"thread_id": str(chat_id), "platform": platform}}
+    from config.settings import settings
+    config = {
+        "configurable": {
+            "thread_id": str(chat_id),
+            "platform": platform,
+            "enable_multimodal_observation": settings.enable_multimodal_observation,
+        }
+    }
     
     try:
         async for graph_event in graph.astream(
