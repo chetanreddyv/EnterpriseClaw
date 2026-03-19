@@ -88,7 +88,10 @@ def init_agent_llm(model_string: str = None) -> BaseChatModel:
     elif provider == "openai":
         init_kwargs["api_key"] = settings.openai_api_key
         
-    elif provider == "google_genai":
+    elif provider in ("google_genai", "google"):
+        # "google" is an alias for the google_genai LangChain provider.
+        # Stored model strings like "google/gemini-3-flash-preview" use this prefix.
+        provider = "google_genai"
         init_kwargs["api_key"] = settings.google_api_key
 
     logger.info(f"LLM: Resolving '{model_string}' -> [provider={provider}, model={actual_model}]")

@@ -1,5 +1,6 @@
 import json
 import logging
+from typing import Any, Dict, List, Optional
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 from config.settings import settings
@@ -45,7 +46,7 @@ async def delegate_task(
     objective: str,
     max_steps: int = settings.worker_max_steps,
     active_model: str = "",
-    approved_tools: list[str] | None = None,
+    approved_tools: Optional[List[str]] = None,
 ) -> str:
     """
     Delegate a complex, multi-step task to a specialized Worker agent.
@@ -133,7 +134,7 @@ def escalate_to_supervisor(reason: str) -> str:
 
 
 @tool
-async def batch_actions(actions: list, config: RunnableConfig = None) -> str:
+async def batch_actions(actions: List[Dict[str, Any]], config: RunnableConfig = None) -> str:
     """
     Execute multiple browser actions sequentially in one turn for efficiency.
     Returns only an action summary; environment state is refreshed by the Worker observer loop.

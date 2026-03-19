@@ -418,7 +418,16 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
     """
     Build the Worker prompt from objective + observation + JIT skill context.
     """
-    objective = state.get("objective", "Complete the assigned task.")
+    objective_raw = state.get("objective")
+    if isinstance(objective_raw, str):
+        objective = objective_raw.strip()
+    elif objective_raw is None:
+        objective = ""
+    else:
+        objective = str(objective_raw).strip()
+    if not objective:
+        objective = "Complete the assigned task."
+
     observation_raw = state.get("observation", "No environment state available yet.")
     observation = _observation_to_prompt_text(observation_raw)
     step_count = state.get("step_count", 0)
@@ -461,7 +470,6 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
         "## Skill Composition Rule\n"
         "- Treat each `BEGIN SKILL` / `END SKILL` block as an independent SOP.\n"
         "- Combine skills only when the objective requires a cross-domain handoff.\n\n"
-        f"## Your Objective\n{objective}\n\n"
         f"## Progress\n- Step {step_count + 1} of {max_steps}\n\n"
         f"## Rules\n"
         f"- Take the NEXT action to accomplish your objective.\n"
@@ -494,6 +502,18 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
     messages = state.get("messages", [])
     history = _build_worker_history_tail(messages, max_messages=10)
 
+    # ── Objective Anchor Pattern ──────────────────────────────────────────────
+    # The Objective is always presented as a persistent HumanMessage right after
+    # the System prompt. This ensures Gemini (and all other LLMs) see a valid
+    # turn order: [System] → [Human: Objective] → [History] → [Human: Observation]
+    # The objective is NOT stored in messages (keeping them lightweight); instead
+    # it is reconstructed each turn from state.objective since it never changes
+    # during a Worker session.
+    objective_anchor = HumanMessage(
+        content=f"Objective: {objective}",
+        id="worker_objective_anchor",
+    )
+
     logger.info("🌀"*80)
     logger.info("🌀 [WORKER TRACE: PROMPT]")
     logger.info(f"🌀 🎯 Objective: {objective}")
@@ -501,10 +521,11 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
     logger.info(f"🌀 🧩 Active Skills: {state.get('active_skills') or 'None Matched'}")
     logger.info(f"🌀 👁️ Observation: {len(observation)} chars")
     logger.info(f"🌀 📜 History: {len(history)} messages.")
+    logger.info(f"🌀 📋 Prompt Structure: [System] → [Objective] → [History] → [Observation]")
     logger.info("🌀"*80)
 
     return {
-        "_formatted_prompt": [sys_msg] + history + [observation_msg],
+        "_formatted_prompt": [sys_msg] + [objective_anchor] + history + [observation_msg],
         "step_count": step_count + 1,
     }
 

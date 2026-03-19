@@ -218,6 +218,15 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
                     m = m.copy(update={"content": truncated})
         processed_history.append(m)
 
+    # Ensure a real human turn exists for strict providers and OpenAI-compatible backends.
+    if not any(isinstance(m, HumanMessage) for m in processed_history):
+        fallback_query = state.get("original_query") or state.get("user_input")
+        if isinstance(fallback_query, list):
+            text_parts = [item.get("text", "") for item in fallback_query if isinstance(item, dict) and item.get("type") == "text"]
+            fallback_query = " ".join(part.strip() for part in text_parts if isinstance(part, str) and part.strip())
+        if fallback_query:
+            processed_history.insert(0, HumanMessage(content=str(fallback_query).strip(), id="supervisor_query_fallback"))
+
     # 1. Identify the most recent HumanMessage index
     last_human_idx = next(
         (i for i in reversed(range(len(processed_history)))
@@ -243,6 +252,10 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
 
     retained_history = trimmed_messages[1:] if trimmed_messages else []
     retained_ids = {m.id for m in retained_history if hasattr(m, "id") and m.id}
+
+    # ── Supervisor Always Has User Turn ──────────────────────────────────────
+    # The Supervisor receives user input as HumanMessage from supervisor_intent_node,
+    # so it always has a valid user turn at the start. No synthetic anchor needed.
 
     # 3. ── GC stale messages from SqliteCheckpointDB ────────────
     all_old_ids = {m.id for m in messages if not isinstance(m, SystemMessage) and hasattr(m, "id") and m.id}
