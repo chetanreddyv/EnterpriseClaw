@@ -12,7 +12,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "openai/gpt-5.4-mini"
+_DEFAULT_MODEL = settings.default_model
 
 
 def is_llm_connection_error(exc: Exception) -> bool:
@@ -57,8 +57,7 @@ def init_agent_llm(model_string: str = None) -> BaseChatModel:
     from langchain.chat_models import init_chat_model
     
     if not model_string:
-        # Default back to google_genai if nothing is set (cost-effective)
-        model_string = "openai/gpt-5.4-mini"
+        model_string = settings.default_model
 
     # Robust splitting: provider/model
     if "/" in model_string:

@@ -12,6 +12,7 @@ Three-tier tool classification:
 
 import logging
 from langgraph.types import interrupt
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -92,10 +93,14 @@ def requires_approval(tool_name: str, approved_tools: set = None) -> bool:
     """
     Check if a tool requires HITL approval.
     
+    - If settings.hitl_enabled is False, ALL tools are auto-approved.
     - AUTONOMOUS tools: never need approval.
     - ALLOWED tools: need approval only if explicitly /deny'd.
     - NOT_ALLOWED tools: always need approval unless explicitly /permit'd (i.e., in approved_tools).
     """
+    if not settings.hitl_enabled:
+        return False
+
     approved_tools = approved_tools or set()
     permitted_tools, denied_tools = _resolve_policy_sets(approved_tools)
     tier = get_tool_tier(tool_name)

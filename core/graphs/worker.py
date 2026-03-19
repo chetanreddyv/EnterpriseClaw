@@ -21,6 +21,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.types import RetryPolicy
 
 from core.graphs.states import WorkerState
+from config.settings import settings
 from core.nodes.worker_nodes import (
     worker_skill_context_node,
     worker_prompt_builder_node,
@@ -59,7 +60,7 @@ def route_after_worker_tools(state: WorkerState) -> str:
 
     # Check step limit
     step_count = state.get("step_count", 0)
-    max_steps = state.get("max_steps", 15)
+    max_steps = state.get("max_steps", settings.worker_max_steps)
     if step_count >= max_steps:
         return "summarize"
 
@@ -74,7 +75,7 @@ def route_after_worker_error(state: WorkerState) -> str:
 
     # Check step limit even during retries
     step_count = state.get("step_count", 0)
-    max_steps = state.get("max_steps", 15)
+    max_steps = state.get("max_steps", settings.worker_max_steps)
     if step_count >= max_steps:
         return "summarize"
 

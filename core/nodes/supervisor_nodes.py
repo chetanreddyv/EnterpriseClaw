@@ -23,6 +23,7 @@ from langchain_core.runnables import RunnableConfig
 from core.graphs.states import SupervisorState
 from core.llm import init_agent_llm, is_llm_connection_error
 from mcp_servers import GLOBAL_TOOL_REGISTRY
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,9 @@ IDENTITY_FILE = Path(__file__).parent.parent.parent / "skills" / "identity" / "s
 SUPERVISOR_TOOLS = {
     "web_search", "web_fetch",
     "save_to_long_term_memory",
+    "schedule_background_task",
     "list_scheduled_tasks",
+    "cancel_scheduled_task",
     "cancel_task",
     "cancel_all_scheduled_tasks",
     "delegate_task",
@@ -144,6 +147,7 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
         "- Use `save_to_long_term_memory` to persist durable user facts and preferences.\n"
         "- Use the System Clock section above for time-sensitive decisions.\n"
         "- Use `web_search` and `web_fetch` for factual lookups.\n"
+        "- Use `schedule_background_task` for all background task scheduling.\n"
         f"- Exact supervisor tools: {', '.join(sorted(SUPERVISOR_TOOLS))}.\n"
         "- Use `delegate_task(objective=...)` for complex multi-step execution. "
         "The Worker will select tools dynamically from matched skills."
@@ -154,10 +158,13 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
     rules_lines = [
         "## Rules",
         "- You are in LIVE mode and TOOL CALLING IS ENABLED.",
+        "- If the user asks to schedule a recurring/background task, YOU MUST call `schedule_background_task`.",
+        "- IMPORTANT: After a tool call is successful, reply to the user confirming the action and DO NOT call the tool again.",
+        "- Do not delegate scheduling requests to Worker. Worker is only for executing objectives.",
         "- If the user asks to list cron jobs, scheduled jobs, or scheduled tasks, call `list_scheduled_tasks` directly.",
         "- If the user asks to cancel all cron/scheduled jobs, call `cancel_all_scheduled_tasks` directly.",
-        "- If the user asks to cancel one scheduled job and provides a job id, call `cancel_task(job_id=...)`.",
-        "- Delegate complex tasks via `delegate_task(objective='...')` with a focused objective.",
+        "- If the user asks to cancel one scheduled job and provides a job id, call `cancel_scheduled_task(job_id=...)`.",
+        "- Delegate complex NON-SCHEDULING tasks via `delegate_task(objective='...')` with a focused objective.",
         "- Example: delegate_task(objective='Navigate LinkedIn, find the hiring manager, and email my resume summary').",
         "- If Worker escalation occurs, do not re-delegate the same unchanged objective.",
         "- Ask the user for clarification, constraints, or missing context after escalation.",
@@ -203,8 +210,8 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
             continue
         if isinstance(m, (AIMessage, ToolMessage)):
             content = m.content
-            if isinstance(content, str) and len(content) > 3000:
-                truncated = content[:3000] + "\n...[Content truncated to preserve context window]..."
+            if isinstance(content, str) and len(content) > settings.supervisor_content_truncation:
+                truncated = content[:settings.supervisor_content_truncation] + "\n...[Content truncated to preserve context window]..."
                 if hasattr(m, "model_copy"):
                     m = m.model_copy(update={"content": truncated})
                 else:
@@ -226,7 +233,7 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
 
     trimmed_messages = trim_messages(
         temp_messages,
-        max_tokens=6000,
+        max_tokens=settings.supervisor_token_budget,
         strategy="last",
         token_counter=_rough_token_counter,
         include_system=True,

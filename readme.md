@@ -3,7 +3,7 @@
 EnterpriseClaw is a production-oriented agent orchestration framework built on LangGraph.
 It separates decision-making (Supervisor) from execution (Worker), adds human approval for risky actions, and keeps durable memory in SQLite + vector indexes.
 
-This repository contains everything needed to run the assistant locally through Telegram, a web endpoint, or CLI.
+This repository contains everything needed to run the assistant locally through Telegram, WhatsApp, a web endpoint, or CLI.
 
 ## At a glance
 
@@ -20,7 +20,7 @@ This repository contains everything needed to run the assistant locally through 
 
 ### Core runtime
 
-- `app.py`: FastAPI entrypoint, Telegram polling/webhook handling, graph lifecycle.
+- `app.py`: FastAPI entrypoint, Telegram/WhatsApp polling, webhook handling, graph lifecycle.
 - `config/settings.py`: environment configuration.
 - `core/graphs/`: LangGraph Supervisor and Worker graph definitions.
 - `core/nodes/`: prompt building, executor, tool nodes, compaction, error handling.
@@ -30,6 +30,7 @@ This repository contains everything needed to run the assistant locally through 
 ### Interfaces
 
 - `interfaces/telegram.py`: Telegram adapter (messages + approval buttons).
+- `interfaces/whatsapp.py`: WhatsApp adapter backed by a Node.js WebSocket bridge.
 - `interfaces/web_chat.py`: web UI route and web adapter scaffold.
 - `interfaces/cli.py`: terminal adapter.
 - `templates/chat.html`, `static/css/chat.css`, `static/js/chat.js`: web chat frontend.
@@ -192,6 +193,10 @@ Common optional keys:
 - `GOOGLE_TOKEN_JSON` (base64 token for Google Workspace APIs)
 - `ALLOWED_CHAT_IDS`
 - `TELEGRAM_SECRET_TOKEN`
+- `WHATSAPP_ENABLED`
+- `WHATSAPP_BRIDGE_URL`
+- `WHATSAPP_BRIDGE_TOKEN`
+- `WHATSAPP_ALLOW_FROM`
 
 ### 4. Optional: Google Workspace auth
 

@@ -2,6 +2,7 @@ import json
 import logging
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ async def save_to_long_term_memory(fact: str) -> str:
 @tool
 async def delegate_task(
     objective: str,
-    max_steps: int = 15,
+    max_steps: int = settings.worker_max_steps,
     active_model: str = "",
     approved_tools: list[str] | None = None,
 ) -> str:
@@ -368,6 +369,33 @@ async def cancel_task(job_id: str) -> str:
 
 
 @tool
+async def cancel_scheduled_task(job_id: str) -> str:
+    """
+    Cancel and remove one scheduled background task.
+
+    Alias of cancel_task with a scheduler-specific name for clearer routing.
+
+    Args:
+        job_id (str): The ID of the task to cancel (from list_scheduled_tasks)
+
+    Returns:
+        str: Confirmation or error message
+    """
+    try:
+        from core.scheduler import get_scheduler
+
+        scheduler = await get_scheduler()
+        success = scheduler.cancel_job(job_id)
+
+        if success:
+            return f"✅ Task {job_id} has been cancelled and removed."
+        return f"❌ Task {job_id} not found."
+    except Exception as e:
+        logger.error(f"cancel_scheduled_task failed: {e}")
+        return f"❌ Failed to cancel scheduled task: {str(e)}"
+
+
+@tool
 async def cancel_all_scheduled_tasks() -> str:
     """
     Cancel and remove all scheduled background tasks.
@@ -426,6 +454,7 @@ TOOL_REGISTRY = {
     "schedule_background_task": schedule_background_task,
     "send_user_notification": send_user_notification,
     "list_scheduled_tasks": list_scheduled_tasks,
+    "cancel_scheduled_task": cancel_scheduled_task,
     "cancel_task": cancel_task,
     "cancel_all_scheduled_tasks": cancel_all_scheduled_tasks,
 }

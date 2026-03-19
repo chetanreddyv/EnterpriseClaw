@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict
 
+from config.settings import settings
+
 try:
     from croniter import croniter
 except ImportError:
@@ -29,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 JOBS_FILE = Path("data/cron/jobs.json")
 JOBS_RUNS_DIR = Path("data/cron/runs")
-RUN_HISTORY_MAX_RECORDS = 200
+RUN_HISTORY_MAX_RECORDS = settings.scheduler_run_history_max
 MAX_RESULT_SUMMARY_CHARS = 1000
 
 
@@ -117,7 +119,7 @@ class SystemScheduler:
         self.jobs: Dict[str, SchedulerJob] = {}
         self.running = False
         self._scheduler_task: Optional[asyncio.Task] = None
-        self.max_concurrent_jobs = 4
+        self.max_concurrent_jobs = settings.scheduler_max_concurrent_jobs
         self.active_jobs = 0
         self._in_flight_job_ids: set[str] = set()
         self._lifecycle_lock = asyncio.Lock()
@@ -428,7 +430,7 @@ class SystemScheduler:
                     "skill_prompts": pre_skill_prompts,
                     "active_skills": prebound_skills,
                     "active_skill_tools": pre_skill_tools,
-                    "max_steps": 15,
+                    "max_steps": settings.worker_max_steps,
                     "step_count": 0,
                     "status": "running",
                     "messages": [],
@@ -594,13 +596,13 @@ class SystemScheduler:
                         asyncio.create_task(self._execute_job(job, claimed=True))
                 
                 # Sleep before next check
-                await asyncio.sleep(10)
+                await asyncio.sleep(settings.scheduler_heartbeat_seconds)
             
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"SchedulerService: Loop error: {e}", exc_info=True)
-                await asyncio.sleep(10)
+                await asyncio.sleep(settings.scheduler_heartbeat_seconds)
 
 
 # Singleton instance

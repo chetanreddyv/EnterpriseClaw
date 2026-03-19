@@ -7,6 +7,7 @@ the messaging layer with the LangGraph agentic loop.
 
 import asyncio
 import logging
+from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
 from contextlib import asynccontextmanager
@@ -15,6 +16,7 @@ from fastapi.responses import JSONResponse
 from langgraph.types import Command
 from config.settings import settings
 from interfaces.telegram import TelegramClient
+from interfaces.whatsapp import WhatsAppClient
 from core.graphs.supervisor import build_supervisor_graph
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from core.channel_manager import channel_manager
@@ -33,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 # ── Globals (initialized at startup) ────────────────────────
 telegram_client: TelegramClient = None
+whatsapp_client: Optional[WhatsAppClient] = None
 graph = None
 checkpointer = None
 
@@ -201,7 +204,7 @@ async def _handle_commands(chat_id: str, text: str, platform: str) -> bool:
                 return True
 
             try:
-                result = await _invoke_registry_tool("cancel_task", {"job_id": job_id})
+                result = await _invoke_registry_tool("cancel_scheduled_task", {"job_id": job_id})
                 await channel_manager.send_message(platform, chat_id, result)
             except Exception as e:
                 await channel_manager.send_message(platform, chat_id, f"❌ Failed to cancel cron job: {e}")
@@ -214,7 +217,163 @@ async def _handle_commands(chat_id: str, text: str, platform: str) -> bool:
         )
         return True
 
+    if cmd == "/settings":
+        subcommand = parts[1].lower() if len(parts) > 1 else "list"
+
+        # ── /settings help ───────────────────────────────────
+        if subcommand in {"help", "h", "?"}:
+            help_text = (
+                "⚙️ **Settings Commands**\n"
+                "- `/settings` or `/settings list` — show all current settings\n"
+                "- `/settings set <key> <value>` — change a setting (takes effect immediately)\n"
+                "- `/settings reset` — reload settings from .env file\n\n"
+                "**Toggleable Keys:**\n"
+                "- `hitl_enabled` — enable/disable HITL approval gates\n"
+                "- `default_model` — default LLM model string\n"
+                "- `worker_max_steps` — max steps per Worker task\n"
+                "- `worker_max_observation_chars` — observation payload size limit\n"
+                "- `worker_max_skill_prompt_chars` — skill prompt context limit\n"
+                "- `supervisor_token_budget` — supervisor history trimming budget\n"
+                "- `supervisor_content_truncation` — AI/Tool content truncation chars\n"
+                "- `scheduler_max_concurrent_jobs` — max concurrent cron jobs\n"
+                "- `scheduler_heartbeat_seconds` — seconds between scheduler checks\n"
+                "- `scheduler_run_history_max` — run history records per job\n\n"
+                "**Example:**\n"
+                "`/settings set hitl_enabled false`\n"
+                "`/settings set default_model google_genai/gemini-2.0-flash`\n"
+                "`/settings set worker_max_steps 25`"
+            )
+            await channel_manager.send_message(platform, chat_id, help_text)
+            return True
+
+        # ── /settings list ───────────────────────────────────
+        if subcommand in {"list", "ls", "show", "get"}:
+            hitl_icon = "✅" if settings.hitl_enabled else "❌"
+            lines = [
+                "⚙️ **Current Settings**\n",
+                f"**🤖 Model**",
+                f"  `default_model` = `{settings.default_model}`\n",
+                f"**🔐 HITL**",
+                f"  `hitl_enabled` = {hitl_icon} `{settings.hitl_enabled}`\n",
+                f"**🌀 Worker**",
+                f"  `worker_max_steps` = `{settings.worker_max_steps}`",
+                f"  `worker_max_observation_chars` = `{settings.worker_max_observation_chars:,}`",
+                f"  `worker_max_skill_prompt_chars` = `{settings.worker_max_skill_prompt_chars:,}`\n",
+                f"**🧠 Supervisor**",
+                f"  `supervisor_token_budget` = `{settings.supervisor_token_budget:,}`",
+                f"  `supervisor_content_truncation` = `{settings.supervisor_content_truncation:,}`\n",
+                f"**📅 Scheduler**",
+                f"  `scheduler_max_concurrent_jobs` = `{settings.scheduler_max_concurrent_jobs}`",
+                f"  `scheduler_heartbeat_seconds` = `{settings.scheduler_heartbeat_seconds}`",
+                f"  `scheduler_run_history_max` = `{settings.scheduler_run_history_max}`",
+            ]
+            await channel_manager.send_message(platform, chat_id, "\n".join(lines))
+            return True
+
+        # ── /settings set <key> <value> ──────────────────────
+        if subcommand == "set":
+            if len(parts) < 4:
+                await channel_manager.send_message(
+                    platform, chat_id,
+                    "Usage: `/settings set <key> <value>`\nExample: `/settings set hitl_enabled false`"
+                )
+                return True
+
+            key = parts[2].lower().strip()
+            raw_value = parts[3].strip()
+
+            # Allowed mutable keys and their types
+            MUTABLE_SETTINGS = {
+                "hitl_enabled": bool,
+                "default_model": str,
+                "worker_max_steps": int,
+                "worker_max_observation_chars": int,
+                "worker_max_skill_prompt_chars": int,
+                "supervisor_token_budget": int,
+                "supervisor_content_truncation": int,
+                "scheduler_max_concurrent_jobs": int,
+                "scheduler_heartbeat_seconds": int,
+                "scheduler_run_history_max": int,
+            }
+
+            if key not in MUTABLE_SETTINGS:
+                known = ", ".join(f"`{k}`" for k in sorted(MUTABLE_SETTINGS))
+                await channel_manager.send_message(
+                    platform, chat_id,
+                    f"❌ Unknown setting `{key}`.\nKnown keys: {known}\n\nTip: use `/settings help` for details."
+                )
+                return True
+
+            expected_type = MUTABLE_SETTINGS[key]
+            try:
+                if expected_type is bool:
+                    if raw_value.lower() in {"true", "1", "yes", "on"}:
+                        coerced = True
+                    elif raw_value.lower() in {"false", "0", "no", "off"}:
+                        coerced = False
+                    else:
+                        raise ValueError(f"Expected true/false, got '{raw_value}'")
+                elif expected_type is int:
+                    coerced = int(raw_value)
+                    if coerced < 0:
+                        raise ValueError("Value must be a non-negative integer")
+                else:
+                    coerced = raw_value
+
+                # Mutate the live settings singleton
+                object.__setattr__(settings, key, coerced)
+                icon = "✅" if coerced is True else ("❌" if coerced is False else "✏️")
+                await channel_manager.send_message(
+                    platform, chat_id,
+                    f"{icon} Setting updated: `{key}` → `{coerced}`\n\n"
+                    "⚠️ *This change is live immediately but not persisted. "
+                    "To make it permanent, add it to your `.env` file.*"
+                )
+            except ValueError as e:
+                await channel_manager.send_message(
+                    platform, chat_id,
+                    f"❌ Invalid value for `{key}`: {e}"
+                )
+            return True
+
+        # ── /settings reset ──────────────────────────────────
+        if subcommand == "reset":
+            try:
+                from config.settings import Settings
+                new_settings = Settings()
+                # Copy all mutable fields from freshly loaded settings
+                for field_name in new_settings.model_fields:
+                    object.__setattr__(settings, field_name, getattr(new_settings, field_name))
+                await channel_manager.send_message(
+                    platform, chat_id,
+                    "🔄 Settings reloaded from `.env` file successfully."
+                )
+            except Exception as e:
+                await channel_manager.send_message(
+                    platform, chat_id,
+                    f"❌ Failed to reload settings: {e}"
+                )
+            return True
+
+        await channel_manager.send_message(
+            platform, chat_id,
+            "Unknown `/settings` command. Use `/settings help`.",
+        )
+        return True
+
     return False
+
+
+def _parse_whatsapp_hitl_decision(text: str) -> str | None:
+    """Parse a text message into a HITL resume decision when explicitly provided."""
+    normalized = (text or "").strip().lower()
+    if normalized in {"/approve", "approve"}:
+        return "approve"
+    if normalized in {"/reject", "reject"}:
+        return "reject"
+    if normalized in {"/edit", "edit"}:
+        return "edit"
+    return None
 
 
 # ==========================================================
@@ -223,7 +382,7 @@ async def _handle_commands(chat_id: str, text: str, platform: str) -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global telegram_client, graph, checkpointer
+    global telegram_client, whatsapp_client, graph, checkpointer
 
     logger.info("🚀 Starting Personal Assistant...")
 
@@ -240,6 +399,21 @@ async def lifespan(app: FastAPI):
     telegram_client = TelegramClient(settings.telegram_bot_token)
     channel_manager.register_client("telegram", telegram_client)
     logger.info("✅ Telegram client initialized and registered")
+
+    # Initialize WhatsApp client (optional)
+    whatsapp_bridge_task = None
+    whatsapp_poll_task = None
+    if settings.whatsapp_enabled:
+        whatsapp_client = WhatsAppClient(
+            bridge_url=settings.whatsapp_bridge_url,
+            bridge_token=settings.whatsapp_bridge_token,
+            allow_from=settings.whatsapp_allow_from_list,
+        )
+        channel_manager.register_client("whatsapp", whatsapp_client)
+        logger.info("✅ WhatsApp client initialized and registered")
+    else:
+        whatsapp_client = None
+        logger.info("ℹ️ WhatsApp channel is disabled")
     
     # Register Web client
     from interfaces.web_chat import web_client
@@ -279,13 +453,25 @@ async def lifespan(app: FastAPI):
 
         # Start polling in background
         polling_task = asyncio.create_task(_poll_telegram())
+        if whatsapp_client:
+            whatsapp_bridge_task = asyncio.create_task(whatsapp_client.start())
+            whatsapp_poll_task = asyncio.create_task(_poll_whatsapp())
+
         logger.info("🟢 Personal Assistant is ready! (polling mode)")
 
         yield
 
         # Shutdown
         logger.info("🔴 Shutting down...")
-        polling_task.cancel()
+        background_tasks = [task for task in (polling_task, whatsapp_poll_task, whatsapp_bridge_task) if task]
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+
+        if whatsapp_client:
+            await whatsapp_client.stop()
+
         await shutdown_scheduler()
         logger.info("✅ System Scheduler shut down")
         await telegram_client.close()
@@ -566,13 +752,64 @@ async def _poll_telegram():
             await asyncio.sleep(2)
 
 
+async def _poll_whatsapp():
+    """
+    Background task: consume normalized events from the WhatsApp bridge client.
+    """
+    if not whatsapp_client:
+        return
+
+    logger.info("📡 Listening for WhatsApp bridge events...")
+
+    while True:
+        try:
+            event = await whatsapp_client.next_event()
+
+            chat_id = str(event.get("chat_id", "") or "").strip()
+            text = str(event.get("content", "") or "").strip()
+            sender_id = str(event.get("sender_id", "User") or "User")
+
+            if not chat_id or not text:
+                continue
+
+            text_preview = text.replace("\n", " ")[:120]
+            logger.info("📨 WhatsApp inbound message chat_id=%s text=%s", chat_id, text_preview)
+
+            decision = _parse_whatsapp_hitl_decision(text)
+            if decision:
+                config = {"configurable": {"thread_id": chat_id, "platform": "whatsapp"}}
+                state = await graph.aget_state(config)
+
+                if state.next and state.next[0] == "human_approval":
+                    asyncio.create_task(direct_resume_invoke(chat_id, decision, "whatsapp"))
+                else:
+                    await channel_manager.send_message(
+                        "whatsapp",
+                        chat_id,
+                        "No action is currently waiting for approval in this chat.",
+                    )
+                continue
+
+            if await _handle_commands(chat_id, text, "whatsapp"):
+                continue
+
+            asyncio.create_task(direct_agent_invoke(chat_id, text, "whatsapp", user_name=sender_id))
+
+        except asyncio.CancelledError:
+            logger.info("📡 WhatsApp polling stopped")
+            break
+        except Exception as e:
+            logger.error("WhatsApp polling error: %s", e)
+            await asyncio.sleep(2)
+
+
 # ==========================================================
 # 3. FastAPI App
 # ==========================================================
 
 app = FastAPI(
     title="Personal AI Assistant",
-    description="Agentic personal assistant via Telegram & Web",
+    description="Agentic personal assistant via Telegram, WhatsApp & Web",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -620,6 +857,9 @@ async def health():
         "status": "healthy",
         "graph_ready": graph is not None,
         "telegram_ready": telegram_client is not None,
+        "whatsapp_enabled": settings.whatsapp_enabled,
+        "whatsapp_ready": whatsapp_client is not None,
+        "whatsapp_connected": bool(whatsapp_client and whatsapp_client.is_connected),
     }
 
 

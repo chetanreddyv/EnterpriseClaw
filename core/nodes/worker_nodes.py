@@ -29,12 +29,13 @@ from mcp_servers import (
     GLOBAL_TOOL_REGISTRY,
     GLOBAL_TOOL_METADATA,
 )
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────
-MAX_OBSERVATION_CHARS = 50_000  # ~12,500 tokens
-MAX_SKILL_PROMPT_CHARS = 10_000
+MAX_OBSERVATION_CHARS = settings.worker_max_observation_chars
+MAX_SKILL_PROMPT_CHARS = settings.worker_max_skill_prompt_chars
 
 TOOL_ERROR_PREFIXES = (
     "error",
@@ -421,7 +422,7 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
     observation_raw = state.get("observation", "No environment state available yet.")
     observation = _observation_to_prompt_text(observation_raw)
     step_count = state.get("step_count", 0)
-    max_steps = state.get("max_steps", 15)
+    max_steps = state.get("max_steps", settings.worker_max_steps)
     active_skill_tools = state.get("active_skill_tools") or []
     active_skills = state.get("active_skills") or []
     skill_prompts = state.get("skill_prompts", "")
