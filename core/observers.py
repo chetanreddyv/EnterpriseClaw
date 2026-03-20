@@ -31,7 +31,12 @@ async def get_browser_environment_state(config: RunnableConfig = None) -> str | 
         title = await session.get_current_page_title()
 
         # Get the LLM-optimized DOM representation (numbered interactive elements)
-        element_map = await session.get_state_as_text()
+        element_map = await BrowserSessionManager.get_state_text(
+            settle_seconds=0.35,
+            retries=2,
+        )
+        if not str(element_map or "").strip() or "empty dom tree" in str(element_map).lower():
+            raise RuntimeError("Perception scan returned empty DOM tree")
 
         text_observation = (
             f"🌐 URL: {url}\n"

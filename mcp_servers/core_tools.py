@@ -159,61 +159,74 @@ async def batch_actions(actions: List[Dict[str, Any]], config: RunnableConfig = 
         session = await BrowserSessionManager.get_session()
         page = await session.get_current_page()
         
-        for i, action in enumerate(actions):
+        for action in actions:
             action_type = action.get("type", "")
             index = action.get("index")
             selector = action.get("selector", "")
 
             if action_type == "click":
                 if index is not None:
-                    element = await session.get_element_by_index(index)
+                    element = await BrowserSessionManager.get_element_by_index(index)
                     if element:
                         xpath = element.xpath
-                        clicked = await page.evaluate(f"""
+                        clicked = await BrowserSessionManager.evaluate_js(
+                            f"""
                             (() => {{
                                 const el = document.evaluate("{xpath}", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
                                 if (!el) return false;
                                 el.click();
                                 return true;
                             }})()
-                        """)
+                            """,
+                            page=page,
+                        )
                         results.append(f"click [{index}]" if clicked else f"click [{index}] FAILED: xpath not found")
                     else:
                         results.append(f"click [{index}] FAILED: not found")
                 elif selector:
                     escaped = selector.replace("'", "\\'")
-                    await page.evaluate(f"document.querySelector('{escaped}').click()")
+                    await BrowserSessionManager.evaluate_js(
+                        f"document.querySelector('{escaped}').click()",
+                        page=page,
+                    )
                     results.append(f"click '{selector}'")
             elif action_type == "type":
                 text = action.get("text", "")
                 escaped_text = text.replace("\\", "\\\\").replace("'", "\\'")
                 if index is not None:
-                    element = await session.get_element_by_index(index)
+                    element = await BrowserSessionManager.get_element_by_index(index)
                     if element:
                         xpath = element.xpath
-                        await page.evaluate(f"""
+                        await BrowserSessionManager.evaluate_js(
+                            f"""
                             (() => {{
                                 const el = document.evaluate("{xpath}", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
                                 if (el) {{ el.focus(); el.value = '{escaped_text}'; el.dispatchEvent(new Event('input', {{bubbles:true}})); }}
                             }})()
-                        """)
+                            """,
+                            page=page,
+                        )
                         results.append(f"type [{index}] = '{text}'")
                     else:
                         results.append(f"type [{index}] FAILED: not found")
                 elif selector:
                     escaped_sel = selector.replace("'", "\\'")
-                    await page.evaluate(f"""
+                    await BrowserSessionManager.evaluate_js(
+                        f"""
                         (() => {{
                             const el = document.querySelector('{escaped_sel}');
                             if (el) {{ el.focus(); el.value = '{escaped_text}'; el.dispatchEvent(new Event('input', {{bubbles:true}})); }}
                         }})()
-                    """)
+                        """,
+                        page=page,
+                    )
                     results.append(f"type '{selector}' = '{text}'")
             elif action_type == "select":
                 text = action.get("text", "")
                 escaped_sel = selector.replace("'", "\\'")
                 escaped_text = text.replace("'", "\\'")
-                await page.evaluate(f"""
+                await BrowserSessionManager.evaluate_js(
+                    f"""
                     (() => {{
                         const el = document.querySelector('{escaped_sel}');
                         if (el) {{
@@ -221,7 +234,9 @@ async def batch_actions(actions: List[Dict[str, Any]], config: RunnableConfig = 
                             if (opt) {{ el.value = opt.value; el.dispatchEvent(new Event('change', {{bubbles:true}})); }}
                         }}
                     }})()
-                """)
+                    """,
+                    page=page,
+                )
                 results.append(f"select '{selector}' = '{text}'")
             elif action_type == "press_key":
                 key = action.get("key", "Enter")

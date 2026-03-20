@@ -8,8 +8,9 @@ Replaces the custom BrowserSessionManager from browser_tools.py.
 import asyncio
 import logging
 import os
+import re
 import time
-from typing import Dict
+from typing import Any, Dict
 
 from browser_use.browser.session import BrowserSession
 from browser_use.dom.views import EnhancedDOMTreeNode
@@ -36,6 +37,72 @@ class BrowserSessionManager:
 
     GC_INTERVAL_SECONDS = 600
     IDLE_TIMEOUT_SECONDS = 1800
+    _EMPTY_DOM_MARKER = "empty dom tree"
+
+    @staticmethod
+    def _unwrap_iife(script: str) -> str:
+        """Convert `(callable)()` payloads into callable forms expected by browser-use."""
+        source = script.strip()
+        iife_match = re.match(r"^\(\s*(?P<body>[\s\S]+?)\s*\)\(\s*\)\s*$", source)
+        if iife_match:
+            return iife_match.group("body").strip()
+        return source
+
+    @staticmethod
+    def _looks_like_js_callable(script: str) -> bool:
+        """Return True when the script is already a JS callable payload."""
+        source = script.lstrip()
+
+        if source.startswith("function") or source.startswith("(function"):
+            return True
+
+        if re.match(r"^\(?\s*(async\s+)?\([^)]*\)\s*=>", source):
+            return True
+
+        if re.match(r"^\(?\s*(async\s+)?[A-Za-z_$][\w$]*\s*=>", source):
+            return True
+
+        return False
+
+    @classmethod
+    def wrap_js_task(cls, script: str) -> str:
+        """
+        Normalize any raw JS snippet into browser-use compatible evaluate payload.
+
+        - Existing callable payloads are preserved.
+        - Invocation-style IIFEs are unwrapped to callable form.
+        - Raw script statements are wrapped in a callable arrow function.
+        """
+        source = str(script or "").strip()
+        if not source:
+            return "() => null"
+
+        source = cls._unwrap_iife(source)
+
+        if cls._looks_like_js_callable(source):
+            return source
+
+        return f"() => {{ {source} }}"
+
+    @classmethod
+    async def evaluate_js(cls, script: str, page: Any = None) -> Any:
+        """Run JS through a centralized wrapper to avoid evaluate API mismatches."""
+        session = await cls.get_session()
+        target_page = page or await session.get_current_page()
+        return await target_page.evaluate(cls.wrap_js_task(script))
+
+    @classmethod
+    async def wait_for_perception_settle(cls, seconds: float = 0.3) -> None:
+        """Bounded settle delay for browser-use perception refresh on SPA pages."""
+        await asyncio.sleep(min(max(seconds, 0.05), 1.0))
+
+    @classmethod
+    def _is_empty_perception_text(cls, state_text: str) -> bool:
+        """Detect known browser-use empty perception payloads."""
+        text = str(state_text or "").strip()
+        if not text:
+            return True
+        return cls._EMPTY_DOM_MARKER in text.lower()
 
     @classmethod
     async def _ensure_session(cls):
@@ -71,7 +138,7 @@ class BrowserSessionManager:
 
     @classmethod
     async def get_page(cls, thread_id: str):
-        """Return the active Playwright Page for a thread."""
+        """Return the active browser-use page for a thread."""
         async with cls._lock:
             await cls._ensure_session()
             assert cls._session is not None
@@ -96,21 +163,74 @@ class BrowserSessionManager:
         return await session.get_browser_state_summary(include_screenshot=True)
 
     @classmethod
-    async def get_state_text(cls) -> str:
-        """Return browser-use's LLM-optimized DOM string (numbered interactive elements)."""
+    async def get_state_text(cls, settle_seconds: float = 0.3, retries: int = 2) -> str:
+        """Return browser-use's LLM-optimized DOM string with warmup/retry safeguards."""
         session = await cls.get_session()
-        return await session.get_state_as_text()
+        total_attempts = max(1, retries + 1)
+        last_text = ""
+
+        for attempt in range(total_attempts):
+            if settle_seconds > 0:
+                await cls.wait_for_perception_settle(settle_seconds)
+
+            try:
+                await session.get_browser_state_summary()
+            except Exception as warmup_error:
+                logger.debug(
+                    "Perception warmup failed (attempt %d/%d): %s",
+                    attempt + 1,
+                    total_attempts,
+                    warmup_error,
+                )
+
+            last_text = await session.get_state_as_text()
+            if not cls._is_empty_perception_text(last_text):
+                return last_text
+
+        return str(last_text or "").strip()
 
     @classmethod
-    async def get_selector_map(cls) -> dict[int, EnhancedDOMTreeNode]:
-        """Return browser-use's index→DOMNode map for element targeting."""
+    async def get_selector_map(
+        cls,
+        settle_seconds: float = 0.3,
+        retries: int = 2,
+    ) -> dict[int, EnhancedDOMTreeNode]:
+        """Return browser-use index map with perception warmup/retry safeguards."""
         session = await cls.get_session()
-        return await session.get_selector_map()
+        total_attempts = max(1, retries + 1)
+        last_map: dict[int, EnhancedDOMTreeNode] = {}
+
+        for attempt in range(total_attempts):
+            if settle_seconds > 0:
+                await cls.wait_for_perception_settle(settle_seconds)
+
+            try:
+                await session.get_browser_state_summary()
+            except Exception as warmup_error:
+                logger.debug(
+                    "Selector-map warmup failed (attempt %d/%d): %s",
+                    attempt + 1,
+                    total_attempts,
+                    warmup_error,
+                )
+
+            selector_map = await session.get_selector_map()
+            if selector_map:
+                return selector_map
+            last_map = selector_map or {}
+
+        return last_map
 
     @classmethod
     async def get_element_by_index(cls, index: int) -> EnhancedDOMTreeNode | None:
         """Look up a DOM element by its Set-of-Marks index."""
         session = await cls.get_session()
+        element = await session.get_element_by_index(index)
+        if element is not None:
+            return element
+
+        # One warmup retry helps when perception lags right after navigation.
+        await cls.get_selector_map(settle_seconds=0.2, retries=1)
         return await session.get_element_by_index(index)
 
     @classmethod

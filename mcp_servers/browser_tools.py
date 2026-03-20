@@ -42,19 +42,6 @@ def _get_thread_id(config) -> str:
     return get_thread_id(config, default="default")
 
 
-async def _settle(seconds: float = 0.3) -> None:
-    """Best-effort settle delay for SPA updates."""
-    await asyncio.sleep(min(max(seconds, 0.05), 1.0))
-
-
-async def get_current_page_context(config: RunnableConfig = None) -> dict[str, str]:
-    """Return URL and title breadcrumbs for the active page."""
-    session = await BrowserSessionManager.get_session()
-    url = await session.get_current_page_url()
-    title = await session.get_current_page_title()
-    return {"url": url or "about:blank", "title": title or "(unknown)"}
-
-
 # ══════════════════════════════════════════════════════════════
 # READ TOOLS (Autonomous)
 # ══════════════════════════════════════════════════════════════
@@ -71,7 +58,7 @@ async def browser_navigate(
     try:
         session = await BrowserSessionManager.get_session()
         await session.navigate_to(url)
-        await _settle(0.5)
+        await BrowserSessionManager.wait_for_perception_settle(0.5)
         title = await session.get_current_page_title()
         current_url = await session.get_current_page_url()
         return f"Action successful: navigated to {url}. Current page: {title} ({current_url})"
@@ -92,7 +79,7 @@ async def browser_get_text(
             return "No page is currently loaded. Use browser_navigate first."
         title = await session.get_current_page_title()
         page = await session.get_current_page()
-        text_content = await page.evaluate("(() => document.body.innerText)()")
+        text_content = await BrowserSessionManager.evaluate_js("() => document.body.innerText", page=page)
         text_content = smart_truncate(str(text_content or ""), max_chars=12000)
         return f"## Current Page: {title}\n**URL**: {current_url}\n\n{text_content}"
     except Exception as e:
@@ -143,7 +130,7 @@ async def browser_go_back(
         session = await BrowserSessionManager.get_session()
         page = await session.get_current_page()
         await page.go_back()
-        await _settle(0.5)
+        await BrowserSessionManager.wait_for_perception_settle(0.5)
         title = await session.get_current_page_title()
         url = await session.get_current_page_url()
         return f"✅ Went back. Now on: **{title}** ({url})"
@@ -166,8 +153,11 @@ async def browser_scroll(
         pixels = min(max(amount, 1), 10) * 720  # viewport height = 720
         delta = pixels if direction == "down" else -pixels
         page = await session.get_current_page()
-        await page.evaluate(f"(() => {{ window.scrollBy(0, {delta}); return true; }})()")
-        await _settle(0.5)
+        await BrowserSessionManager.evaluate_js(
+            f"window.scrollBy(0, {delta}); return true;",
+            page=page,
+        )
+        await BrowserSessionManager.wait_for_perception_settle(0.5)
         return f"Action successful: scrolled {direction} by {pixels}px."
     except Exception as e:
         return f"Failed to scroll: {type(e).__name__} - {str(e)}"
@@ -187,7 +177,11 @@ async def browser_wait_for(
             # Poll for text presence via JS
             start = time.time()
             while (time.time() - start) < min(seconds, 30):
-                found = await page.evaluate(f"(() => document.body.innerText.includes('{text}'))()")
+                escaped_text = text.replace("\\", "\\\\").replace("'", "\\'")
+                found = await BrowserSessionManager.evaluate_js(
+                    f"() => document.body.innerText.includes('{escaped_text}')",
+                    page=page,
+                )
                 if found:
                     return f"✅ Text '{text}' appeared on the page."
                 await asyncio.sleep(0.5)
@@ -217,7 +211,7 @@ async def browser_snapshot(
         if url == "about:blank":
             return "No page is currently loaded. Use browser_navigate first."
 
-        await _settle(0.3)
+        await BrowserSessionManager.wait_for_perception_settle(0.3)
 
         # Use browser-use's LLM representation
         element_map = await session.get_state_as_text()
@@ -307,7 +301,7 @@ async def browser_close_current_tab(
         if current_target:
             from browser_use.browser.events import CloseTabEvent
             await session.event_bus.dispatch(CloseTabEvent(target_id=current_target))
-            await _settle(0.3)
+            await BrowserSessionManager.wait_for_perception_settle(0.3)
             title = await session.get_current_page_title()
             return (
                 "Action successful: Closed current tab. "
@@ -340,7 +334,7 @@ async def browser_click(
         session = await BrowserSessionManager.get_session()
 
         # Look up the element by index from browser-use's selector map
-        element = await session.get_element_by_index(index)
+        element = await BrowserSessionManager.get_element_by_index(index)
         if element is None:
             return f"Action failed: Element index [{index}] not found on the current page."
 
@@ -366,11 +360,11 @@ async def browser_click(
             return true;
         }})()
         """
-        result = await page.evaluate(click_script)
+        result = await BrowserSessionManager.evaluate_js(click_script, page=page)
         if not result:
             return f"Action failed: Could not click element [{index}] via XPath."
 
-        await _settle(1.0)
+        await BrowserSessionManager.wait_for_perception_settle(1.0)
 
         # Allow context-level new tab detection
         thread_id = _get_thread_id(config)
@@ -403,7 +397,7 @@ async def browser_type(
     try:
         session = await BrowserSessionManager.get_session()
 
-        element = await session.get_element_by_index(index)
+        element = await BrowserSessionManager.get_element_by_index(index)
         if element is None:
             return f"Action failed: Element index [{index}] not found."
 
@@ -425,14 +419,14 @@ async def browser_type(
             return true;
         }})()
         """
-        result = await page.evaluate(type_script)
+        result = await BrowserSessionManager.evaluate_js(type_script, page=page)
         if not result:
             return f"Action failed: Error typing into [{index}]."
 
         summary = f"typed into element [{index}]"
         if submit:
             await page.press("Enter")
-            await _settle(0.5)
+            await BrowserSessionManager.wait_for_perception_settle(0.5)
             summary += " and submitted"
 
         return f"Action successful: {summary}."
@@ -455,9 +449,7 @@ async def browser_execute_js(
         if url == "about:blank":
             return "No page is currently loaded. Use browser_navigate first."
         page = await session.get_current_page()
-        # Wrap user script in arrow function format required by browser-use CDP
-        wrapped_script = f"(() => {{ {script} }})()"
-        result = await page.evaluate(wrapped_script)
+        result = await BrowserSessionManager.evaluate_js(script, page=page)
         result_preview = str(result) if result is not None else "(no return value)"
         if len(result_preview) > 180:
             result_preview = result_preview[:180] + "..."
@@ -501,7 +493,7 @@ async def browser_select_option(
             return 'no_match';
         }})()
         """
-        result = await page.evaluate(select_script)
+        result = await BrowserSessionManager.evaluate_js(select_script, page=page)
 
         if result == "not_found":
             return f"❌ Could not find select element matching '{selector}'."
@@ -530,7 +522,7 @@ async def browser_press_key(
         session = await BrowserSessionManager.get_session()
         page = await session.get_current_page()
         await page.press(key)
-        await _settle(0.3)
+        await BrowserSessionManager.wait_for_perception_settle(0.3)
         return f"Action successful: pressed '{key}'."
     except Exception as e:
         return f"Failed to press key '{key}': {type(e).__name__} - {str(e)}"
@@ -575,7 +567,7 @@ async def browser_hover(
             return true;
         }})()
         """
-        result = await page.evaluate(hover_script)
+        result = await BrowserSessionManager.evaluate_js(hover_script, page=page)
 
         if not result:
             return f"❌ Could not find element matching '{selector}'."
@@ -639,8 +631,9 @@ async def browser_file_upload(
         escaped_selector = selector.replace("'", "\\'")
 
         # Check if element is a file input
-        is_file_input = await page.evaluate(
-            f"(() => {{ const el = document.querySelector('{escaped_selector}'); return !!el && el.type === 'file'; }})()"
+        is_file_input = await BrowserSessionManager.evaluate_js(
+            f"(() => {{ const el = document.querySelector('{escaped_selector}'); return !!el && el.type === 'file'; }})()",
+            page=page,
         )
         if not is_file_input:
             return f"❌ Element `{selector}` is not a file input."
