@@ -476,7 +476,7 @@ async def lifespan(app: FastAPI):
         logger.info("✅ System Scheduler shut down")
         await telegram_client.close()
         try:
-            from mcp_servers.browser_tools import BrowserSessionManager
+            from core.browser_session import BrowserSessionManager
             await BrowserSessionManager.shutdown()
             logger.info("✅ Browser sessions closed")
         except Exception as e:

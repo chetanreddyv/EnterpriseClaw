@@ -4,7 +4,6 @@ config/settings.py — Centralized configuration via Pydantic Settings.
 All env vars are loaded from .env and validated at startup.
 """
 
-import logging
 from dotenv import load_dotenv
 
 load_dotenv()

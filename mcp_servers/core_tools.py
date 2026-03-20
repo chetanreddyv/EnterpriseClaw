@@ -1,4 +1,4 @@
-import json
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 from langchain_core.tools import tool
@@ -152,41 +152,86 @@ async def batch_actions(actions: List[Dict[str, Any]], config: RunnableConfig = 
             {"type": "click", "selector": "#submit"}
         ]
     """
-    from mcp_servers.browser_tools import BrowserSessionManager
-
-    # Extract thread_id from config
-    thread_id = "default"
-    if config and "configurable" in config:
-        thread_id = config["configurable"].get("thread_id", "default")
+    from core.browser_session import BrowserSessionManager
 
     results = []
     try:
-        page = await BrowserSessionManager.get_page(thread_id)
+        session = await BrowserSessionManager.get_session()
+        page = await session.get_current_page()
         
         for i, action in enumerate(actions):
             action_type = action.get("type", "")
+            index = action.get("index")
             selector = action.get("selector", "")
 
             if action_type == "click":
-                await page.click(selector)
-                results.append(f"click '{selector}'")
+                if index is not None:
+                    element = await session.get_element_by_index(index)
+                    if element:
+                        xpath = element.xpath
+                        clicked = await page.evaluate(f"""
+                            (() => {{
+                                const el = document.evaluate("{xpath}", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                                if (!el) return false;
+                                el.click();
+                                return true;
+                            }})()
+                        """)
+                        results.append(f"click [{index}]" if clicked else f"click [{index}] FAILED: xpath not found")
+                    else:
+                        results.append(f"click [{index}] FAILED: not found")
+                elif selector:
+                    escaped = selector.replace("'", "\\'")
+                    await page.evaluate(f"document.querySelector('{escaped}').click()")
+                    results.append(f"click '{selector}'")
             elif action_type == "type":
                 text = action.get("text", "")
-                await page.fill(selector, text)
-                results.append(f"type '{selector}' = '{text}'")
+                escaped_text = text.replace("\\", "\\\\").replace("'", "\\'")
+                if index is not None:
+                    element = await session.get_element_by_index(index)
+                    if element:
+                        xpath = element.xpath
+                        await page.evaluate(f"""
+                            (() => {{
+                                const el = document.evaluate("{xpath}", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                                if (el) {{ el.focus(); el.value = '{escaped_text}'; el.dispatchEvent(new Event('input', {{bubbles:true}})); }}
+                            }})()
+                        """)
+                        results.append(f"type [{index}] = '{text}'")
+                    else:
+                        results.append(f"type [{index}] FAILED: not found")
+                elif selector:
+                    escaped_sel = selector.replace("'", "\\'")
+                    await page.evaluate(f"""
+                        (() => {{
+                            const el = document.querySelector('{escaped_sel}');
+                            if (el) {{ el.focus(); el.value = '{escaped_text}'; el.dispatchEvent(new Event('input', {{bubbles:true}})); }}
+                        }})()
+                    """)
+                    results.append(f"type '{selector}' = '{text}'")
             elif action_type == "select":
                 text = action.get("text", "")
-                await page.select_option(selector, text)
+                escaped_sel = selector.replace("'", "\\'")
+                escaped_text = text.replace("'", "\\'")
+                await page.evaluate(f"""
+                    (() => {{
+                        const el = document.querySelector('{escaped_sel}');
+                        if (el) {{
+                            const opt = Array.from(el.options).find(o => o.text === '{escaped_text}' || o.value === '{escaped_text}');
+                            if (opt) {{ el.value = opt.value; el.dispatchEvent(new Event('change', {{bubbles:true}})); }}
+                        }}
+                    }})()
+                """)
                 results.append(f"select '{selector}' = '{text}'")
             elif action_type == "press_key":
                 key = action.get("key", "Enter")
-                await page.keyboard.press(key)
+                await page.press(key)
                 results.append(f"press_key '{key}'")
             else:
                 results.append(f"unknown action type '{action_type}'")
 
             # Small delay between actions for DOM stability
-            await page.wait_for_timeout(200)
+            await asyncio.sleep(0.2)
 
     except Exception as e:
         summary = (
@@ -307,7 +352,6 @@ async def list_scheduled_tasks() -> str:
     """
     try:
         from core.scheduler import get_scheduler
-        import json
         
         scheduler = await get_scheduler()
         jobs = scheduler.list_jobs()

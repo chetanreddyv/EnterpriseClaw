@@ -7,7 +7,6 @@ its payload without crashing the entire graph turn.
 """
 
 from typing import Dict, Any
-from langchain_core.messages import ToolMessage
 
 def tool_error_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """

@@ -12,7 +12,7 @@ import os
 import uuid
 import shutil
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -234,7 +234,6 @@ class ZvecMemoryStore:
         # 2. BM25 keyword search (FTS5)
         fts_results = await self.db.search_fts(query, limit=top_k * 2)
         fts_ranked = [r["id"] for r in fts_results]
-        fts_timestamps = {r["id"]: r.get("updated_ts", "") for r in fts_results}
 
         # 3. Merge via RRF
         rrf_scores = {}

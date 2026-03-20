@@ -23,7 +23,6 @@ def _derive_category(module_name: str) -> str:
     return module_name
 
 def load_plugins():
-    global GLOBAL_TOOL_REGISTRY, GLOBAL_TOOL_METADATA
     plugin_dir = os.path.dirname(__file__)
 
     GLOBAL_TOOL_REGISTRY.clear()

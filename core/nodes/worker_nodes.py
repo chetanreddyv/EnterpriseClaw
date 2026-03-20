@@ -151,6 +151,42 @@ def _observation_to_prompt_text(observation: Any) -> str:
     return text or "No environment state available yet."
 
 
+def _extract_text_from_content(content: Any) -> str:
+    """
+    Extract text from AIMessage.content in any format (string or multimodal list).
+    Used by worker_summarize_node to capture actual response text.
+    Returns empty string if content is empty or None, not a generic fallback message.
+    """
+    if not content:
+        return ""
+
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                item_type = str(item.get("type", "")).strip().lower()
+                if item_type == "text":
+                    text = str(item.get("text", "")).strip()
+                    if text:
+                        parts.append(text)
+            elif isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+
+        if parts:
+            return "\n\n".join(parts)
+        return ""
+
+    # Fallback for dict or other types
+    if isinstance(content, dict):
+        text = str(content.get("text", "")).strip()
+        return text if text else ""
+
+    return ""
+
+
 def _extract_tool_call_ids(tool_calls: list[Any]) -> list[str]:
     """Return normalized tool_call ids from AIMessage.tool_calls payloads."""
     ids: list[str] = []
@@ -888,6 +924,7 @@ async def worker_summarize_node(state: WorkerState) -> Dict[str, Any]:
     """
     Called when the Worker reaches END.
     Extracts the last AI message as the result_summary.
+    Handles both string and multimodal (list) content formats.
     """
     existing_status = state.get("status")
     existing_summary = (state.get("result_summary") or "").strip()
@@ -899,14 +936,15 @@ async def worker_summarize_node(state: WorkerState) -> Dict[str, Any]:
 
     messages = state.get("messages", [])
 
-    # Find the last AI response
+    # Find the last AI response and extract its text (handles string and multimodal formats)
     for msg in reversed(messages):
         if isinstance(msg, AIMessage):
             content = msg.content
-            if isinstance(content, str) and content.strip():
+            text_summary = _extract_text_from_content(content)
+            if text_summary:
                 return {
                     "status": "completed",
-                    "result_summary": content.strip(),
+                    "result_summary": text_summary,
                 }
 
     return {
