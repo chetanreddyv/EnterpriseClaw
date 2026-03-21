@@ -4,13 +4,13 @@ core/graphs/worker.py — The Worker SubGraph Definition.
 An ephemeral, specialized graph for multi-step task execution.
 Operates in a strict Action-Observation loop with State Amnesia.
 
-Pipeline: SkillContext → PromptBuilder → Executor → [Tools → PromptBuilder | Summarize → END]
-                                                        ↑              |
-                                                        └──────────────┘
+Pipeline: SkillContext → PromptBuilder → Executor → [Tools → RefreshEnvironment → PromptBuilder | Summarize → END]
+                                                        ↑                                   |
+                                                        └───────────────────────────────────┘
 
 Key properties:
 - No persistent memory or conversation history.
-- observation is REPLACED each turn (State Amnesia).
+- environment_snapshot is REPLACED each turn (State Amnesia).
 - messages contain only lightweight action summaries.
 - Sequential execution for stateful domains (browser, exec).
 - Hard step limit prevents infinite loops.
@@ -24,6 +24,7 @@ from core.graphs.states import WorkerState
 from config.settings import settings
 from core.nodes.worker_nodes import (
     worker_skill_context_node,
+    worker_refresh_environment_node,
     worker_prompt_builder_node,
     worker_executor_node,
     worker_tools_node,
@@ -54,8 +55,8 @@ def route_after_worker_executor(state: WorkerState) -> str:
 
 def route_after_worker_tools(state: WorkerState) -> str:
     """After tools finish, check if we should continue or stop."""
-    # Check for escalation
-    if state.get("status") in {"escalated", "failed"}:
+    # Check for escalation or completion
+    if state.get("status") in {"escalated", "failed", "completed"}:
         return "summarize"
 
     # Check step limit
@@ -64,8 +65,8 @@ def route_after_worker_tools(state: WorkerState) -> str:
     if step_count >= max_steps:
         return "summarize"
 
-    # Continue the loop
-    return "prompt_builder"
+    # Continue the loop through environment refresh
+    return "refresh_environment"
 
 
 def route_after_worker_error(state: WorkerState) -> str:
@@ -103,6 +104,7 @@ def build_worker_graph(checkpointer=None):
 
     # Add Nodes
     workflow.add_node("skill_context", worker_skill_context_node, retry=retry_policy)
+    workflow.add_node("refresh_environment", worker_refresh_environment_node, retry=retry_policy)
     workflow.add_node("prompt_builder", worker_prompt_builder_node, retry=retry_policy)
     workflow.add_node("executor", worker_executor_node, retry=retry_policy)
     workflow.add_node("tools", worker_tools_node, retry=retry_policy)
@@ -125,9 +127,11 @@ def build_worker_graph(checkpointer=None):
 
     # Conditional routing post-tools (check escalation + step limit)
     workflow.add_conditional_edges("tools", route_after_worker_tools, {
-        "prompt_builder": "prompt_builder",
+        "refresh_environment": "refresh_environment",
         "summarize": "summarize",
     })
+
+    workflow.add_edge("refresh_environment", "prompt_builder")
 
     # Error handling routes
     workflow.add_conditional_edges("tool_error", route_after_worker_error, {

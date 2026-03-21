@@ -99,8 +99,7 @@ def init_agent_llm(model_string: str = None) -> BaseChatModel:
         logger.info(f"LLM: Custom Base URL: {init_kwargs['base_url']}")
 
     try:
-        llm = init_chat_model(actual_model, model_provider=provider, **init_kwargs)
-        return llm
+        return init_chat_model(actual_model, model_provider=provider, **init_kwargs)
     except Exception as e:
         logger.error(f"  -> Failed to load '{model_string}', falling back to default. Error: {e}")
         # Robust fallback

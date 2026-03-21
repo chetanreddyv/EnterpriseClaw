@@ -3,7 +3,7 @@ core/graphs/states.py — State Schemas for the Supervisor-Worker Architecture.
 
 Two completely separate schemas. The Supervisor never sees Worker internals.
 The Worker's messages are a lightweight action ledger; heavy environment 
-state lives only in `observation`, which is REPLACED (not appended) each turn.
+state lives only in `environment_snapshot`, which is REPLACED (not appended) each turn.
 """
 
 from typing import Annotated, TypedDict, NotRequired, Any
@@ -51,8 +51,8 @@ class WorkerState(TypedDict):
     
     CRITICAL DESIGN DECISIONS:
     - `messages` is a lightweight ACTION LOG only ("Clicked X", "Typed Y").
-      The heavy environment state lives ONLY in `observation`.
-    - `observation` is REPLACED each turn, never appended.
+      The heavy environment state lives ONLY in `environment_snapshot`.
+    - `environment_snapshot` is REPLACED each turn, never appended.
     - This state is destroyed when the Worker finishes. It never persists
       to the Supervisor's CheckpointDB.
     """
@@ -64,8 +64,8 @@ class WorkerState(TypedDict):
     
     # REPLACED each turn. Current browser/exec environment state.
     # May be text-only or multimodal payload blocks.
-    observation: str | list[dict[str, Any]]
-    
+    environment_snapshot: str | list[dict[str, Any]]
+
     # JIT skill context fetched once from the Worker objective
     skill_prompts: str
     active_skills: list[str]
@@ -88,6 +88,10 @@ class WorkerState(TypedDict):
     
     # Internal communication between PromptBuilder and Executor
     _formatted_prompt: list[BaseMessage] # Minimal action-observation prompt (objective + observation)
+
+    # Internal worker refresh contract.
+    # tools-node sets categories that require anchor refresh before next LLM call.
+    _refresh_categories: NotRequired[list[str]]
     
     # HITL policy directives inherited from Supervisor
     approved_tools: list[str]

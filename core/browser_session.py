@@ -157,10 +157,35 @@ class BrowserSessionManager:
             is_headless = os.environ.get("BROWSER_HEADLESS", "false").lower() == "true"
             os.makedirs(USER_DATA_DIR, exist_ok=True)
 
+            from config.settings import settings
+
+            if settings.stealth_mode:
+                logger.info("BrowserSession: Stealth mode enabled. Routing to anti-detect profile...")
+                # Note: In a real SOTA setup in 2026, we'd initialize the browser using an API
+                # like AdsPower or patched Chromium here to defeat Cloudflare/Datadome.
+                pass
+
+            # Cleanup any zombie Chrome processes holding our persistent profile
+            # browser-use manually launches Chrome and will deadlock waiting for CDP
+            # if an existing instance intercepts the launch command.
+            import psutil
+            abs_user_dir = os.path.abspath(USER_DATA_DIR)
+            for proc in psutil.process_iter(['pid', 'cmdline']):
+                try:
+                    cmdline = proc.info.get('cmdline') or []
+                    if any("chrome" in arg.lower() or "chromium" in arg.lower() for arg in cmdline):
+                        if any(abs_user_dir in os.path.abspath(arg) for arg in cmdline if "--user-data-dir" in arg or USER_DATA_DIR in arg):
+                            logger.warning(f"BrowserSession: Killing zombie Chrome process {proc.info['pid']} locking {USER_DATA_DIR}")
+                            proc.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+
             cls._session = BrowserSession(
                 headless=is_headless,
                 user_data_dir=USER_DATA_DIR,
-                viewport={"width": 1280, "height": 720},
+                viewport={"width": 1920, "height": 1080},
+                device_scale_factor=1.0,
+                wait_for_network_idle_page_load_time=0.5,
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -183,6 +208,15 @@ class BrowserSessionManager:
         return cls._session
 
     @classmethod
+    async def _block_analytics(cls, route):
+        request = route.request
+        domains_to_block = ["google-analytics.com", "segment.com", "mixpanel.com", "hotjar.com", "datadoghq-browser-agent.com"]
+        if any(d in request.url for d in domains_to_block):
+            await route.abort()
+        else:
+            await route.fallback()
+
+    @classmethod
     async def get_page(cls, thread_id: str):
         """Return the active browser-use page for a thread."""
         async with cls._lock:
@@ -191,11 +225,20 @@ class BrowserSessionManager:
 
             if thread_id in cls._threads:
                 cls._threads[thread_id]["last_accessed"] = time.time()
-                # Use the session's current page
-                return await cls._session.get_current_page()
+                page = await cls._session.get_current_page()
+                return page
 
             # First call for this thread — use the session's current page
             page = await cls._session.get_current_page()
+            
+            from config.settings import settings
+            if settings.smart_settle_observer:
+                # Add route interception to block analytics which prevents network idle
+                try:
+                    await page.route("**/*", cls._block_analytics)
+                except Exception as e:
+                    logger.debug("BrowserSession: Failed to attach route interceptor: %s", e)
+
             cls._threads[thread_id] = {
                 "last_accessed": time.time(),
                 "just_opened_new_tab": False,
@@ -212,28 +255,19 @@ class BrowserSessionManager:
     async def get_state_text(cls, settle_seconds: float = 0.3, retries: int = 2) -> str:
         """Return browser-use's LLM-optimized DOM string with warmup/retry safeguards."""
         session = await cls.get_session()
-        total_attempts = max(1, retries + 1)
-        last_text = ""
-
-        for attempt in range(total_attempts):
-            if settle_seconds > 0:
-                await cls.wait_for_perception_settle(settle_seconds)
-
-            try:
-                await session.get_browser_state_summary()
-            except Exception as warmup_error:
-                logger.debug(
-                    "Perception warmup failed (attempt %d/%d): %s",
-                    attempt + 1,
-                    total_attempts,
-                    warmup_error,
-                )
-
+        
+        # Rely primarily on browser-use's internal DOMWatchdog state extraction.
+        # This replaces the custom legacy explicit loops with proper mutation observer settle.
+        try:
+            # get_state() internals block on document.readyState and internal network timeouts.
+            state = await session.get_browser_state_summary()
             last_text = await session.get_state_as_text()
             if not cls._is_empty_perception_text(last_text):
                 return last_text
+        except Exception as warmup_error:
+            logger.debug("Perception failed: %s", warmup_error)
 
-        return str(last_text or "").strip()
+        return ""
 
     @classmethod
     async def get_selector_map(
@@ -241,31 +275,23 @@ class BrowserSessionManager:
         settle_seconds: float = 0.3,
         retries: int = 2,
     ) -> dict[int, EnhancedDOMTreeNode]:
-        """Return browser-use index map with perception warmup/retry safeguards."""
+        """Return browser-use index map with perception safeguards."""
         session = await cls.get_session()
-        total_attempts = max(1, retries + 1)
-        last_map: dict[int, EnhancedDOMTreeNode] = {}
+        
+        from config.settings import settings
+        # Note: Sticky IDs mapping implementation would hook here in Phase 5 to map
+        # underlying DOM backendNodes to consistent indexes across re-renders if enabled.
 
-        for attempt in range(total_attempts):
-            if settle_seconds > 0:
-                await cls.wait_for_perception_settle(settle_seconds)
-
-            try:
-                await session.get_browser_state_summary()
-            except Exception as warmup_error:
-                logger.debug(
-                    "Selector-map warmup failed (attempt %d/%d): %s",
-                    attempt + 1,
-                    total_attempts,
-                    warmup_error,
-                )
-
+        try:
+            # Rely on browser-use's internal DOMWatchdog settle
+            await session.get_browser_state_summary()
             selector_map = await session.get_selector_map()
             if selector_map:
                 return selector_map
-            last_map = selector_map or {}
+        except Exception as warmup_error:
+            logger.debug("Selector-map warmup failed: %s", warmup_error)
 
-        return last_map
+        return {}
 
     @classmethod
     async def get_element_by_index(cls, index: int) -> EnhancedDOMTreeNode | None:

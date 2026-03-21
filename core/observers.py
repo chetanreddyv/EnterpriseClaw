@@ -10,19 +10,8 @@ from core.text_utils import get_thread_id
 logger = logging.getLogger(__name__)
 
 
-def _is_multimodal_observation_enabled(config: RunnableConfig | None) -> bool:
-    """Toggle multimodal observation payloads through config.configurable."""
-    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
-    raw_flag = configurable.get("enable_multimodal_observation", False)
-    if isinstance(raw_flag, bool):
-        return raw_flag
-    if isinstance(raw_flag, str):
-        return raw_flag.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(raw_flag)
-
-
 async def get_browser_environment_state(config: RunnableConfig = None) -> str | list[dict[str, Any]]:
-    """Return compressed browser environment state using browser-use's perception engine."""
+    """Return default multimodal browser state: text map + SoM screenshot."""
     from core.browser_session import BrowserSessionManager
 
     try:
@@ -31,35 +20,28 @@ async def get_browser_environment_state(config: RunnableConfig = None) -> str | 
         title = await session.get_current_page_title()
 
         # Get the LLM-optimized DOM representation (numbered interactive elements)
-        element_map = await BrowserSessionManager.get_state_text(
-            settle_seconds=0.35,
-            retries=2,
-        )
+        element_map = await BrowserSessionManager.get_state_text()
         if not str(element_map or "").strip() or "empty dom tree" in str(element_map).lower():
-            raise RuntimeError("Perception scan returned empty DOM tree")
-
+            # If map is totally empty, we will rely entirely on the visual fallback below.
+            element_map = "No interactive elements detected in text map."
+            
         text_observation = (
             f"🌐 URL: {url}\n"
             f"🏷️ Title: {title}\n\n"
             f"🕸️ Interactive Elements:\n{element_map}"
         )
 
-        # Handle multimodal vision (Set-of-Marks screenshot)
-        multimodal_enabled = _is_multimodal_observation_enabled(config)
-        if multimodal_enabled:
-            try:
-                screenshot_bytes = await session.take_screenshot(
-                    format="jpeg", quality=50
-                )
-                b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
-                return [
-                    {"type": "text", "text": text_observation},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                ]
-            except Exception as ss_error:
-                logger.warning("Browser observer: screenshot failed: %s", ss_error)
-
-        return text_observation
+        # Always attach SoM screenshot when browser snapshot succeeds.
+        try:
+            screenshot_bytes = await session.take_screenshot(format="jpeg", quality=60)
+            b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+            return [
+                {"type": "text", "text": text_observation},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            ]
+        except Exception as ss_error:
+            logger.warning("Browser observer: screenshot failed, returning text-only state: %s", ss_error)
+            return text_observation
     except Exception as snapshot_error:
         logger.warning("Browser observer: snapshot failed: %s", snapshot_error)
 

@@ -93,7 +93,7 @@ async def delegate_task(
             "step_count": 0,
             "status": "running",
             "messages": [],
-            "observation": "No environment state yet. Take the first action to observe the environment.",
+            "environment_snapshot": "No environment state yet. Take the first action to observe the environment.",
             "result_summary": "",
             "tool_failure_count": 0,
             "_retry": False,
@@ -134,6 +134,21 @@ def escalate_to_supervisor(reason: str) -> str:
     # This is a sentinel tool. The worker_tools_node detects its name
     # and sets status="escalated" + result_summary=reason in the state.
     return reason
+
+
+@tool
+def complete_task(summary: str) -> str:
+    """
+    Use this tool ONLY when you have fully accomplished your objective.
+    Immediately stops the current task and returns the summary to the Supervisor.
+    
+    Args:
+        summary (str): A detailed explanation of exactly what you accomplished.
+            Example: "Successfully navigated to YouTube, searched for the trailer, and clicked play. The video is currently playing."
+    """
+    # This is a sentinel tool. The worker_tools_node detects its name
+    # and sets status="completed" + result_summary=summary in the state.
+    return summary
 
 
 @tool
@@ -513,6 +528,7 @@ TOOL_REGISTRY = {
     "save_to_long_term_memory": save_to_long_term_memory,
     "delegate_task": delegate_task,
     "escalate_to_supervisor": escalate_to_supervisor,
+    "complete_task": complete_task,
     "batch_actions": batch_actions,
     "schedule_background_task": schedule_background_task,
     "send_user_notification": send_user_notification,

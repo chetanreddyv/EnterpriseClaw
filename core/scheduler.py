@@ -435,7 +435,7 @@ class SystemScheduler:
                     "step_count": 0,
                     "status": "running",
                     "messages": [],
-                    "observation": "Starting isolated background task.",
+                    "environment_snapshot": "Starting isolated background task.",
                     "result_summary": "",
                     "tool_failure_count": 0,
                     "_retry": False,

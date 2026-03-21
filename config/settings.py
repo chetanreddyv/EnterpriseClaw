@@ -61,10 +61,30 @@ class Settings(BaseSettings):
         description="Global toggle for HITL approval gates. When False, all tools are auto-approved.",
     )
 
-    # ── Browser Observations ──────────────────────────────────
+    # ── Browser Observations & Hardening ──────────────────────
     enable_multimodal_observation: bool = Field(
         default=True,
         description="Enable multimodal observations (browser screenshots) in Worker environment state.",
+    )
+    strict_action_loop: bool = Field(
+        default=True,
+        description="Enforce single stateful action per turn with explicit tool failure for truncations.",
+    )
+    smart_settle_observer: bool = Field(
+        default=True,
+        description="Block analytics routes and rely on browser-use's internal DOMWatchdog state extraction.",
+    )
+    auto_visual_fallback: bool = Field(
+        default=True,
+        description="Automatically trigger screenshot capture if text map extraction confidence is very low.",
+    )
+    stealth_mode: bool = Field(
+        default=False,
+        description="Route session creation to an anti-detect profile or patched binary.",
+    )
+    sticky_ids: bool = Field(
+        default=True,
+        description="Remap node indexing to persist indices across fast DOM re-renders.",
     )
 
     # ── Default Model ────────────────────────────────────────

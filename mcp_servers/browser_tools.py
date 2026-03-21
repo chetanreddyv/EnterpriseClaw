@@ -163,10 +163,21 @@ async def browser_scroll(
         current_url = await session.get_current_page_url()
         if current_url == "about:blank":
             return "No page is currently loaded. Use browser_navigate first."
-        pixels = min(max(amount, 1), 10) * 720  # viewport height = 720
-        delta = pixels if direction == "down" else -pixels
         page = await session.get_current_page()
-        await page.evaluate(f"(() => {{ window.scrollBy(0, {delta}); return true; }})()")
+        viewport_height = await BrowserSessionManager.evaluate_js(
+            "return window.innerHeight || document.documentElement.clientHeight || 1080;",
+            page=page,
+        )
+        try:
+            viewport_height_int = max(200, int(viewport_height))
+        except Exception:
+            viewport_height_int = 1080
+        pixels = min(max(amount, 1), 10) * viewport_height_int
+        delta = pixels if direction == "down" else -pixels
+        await BrowserSessionManager.evaluate_js(
+            f"window.scrollBy(0, {delta}); return true;",
+            page=page,
+        )
         await _settle(0.5)
         return f"Action successful: scrolled {direction} by {pixels}px."
     except Exception as e:
@@ -329,6 +340,7 @@ async def browser_click(
         description="The index number of the element to click, from the Interactive Elements map "
                     "(e.g., if the map shows '[42] <button>Submit</button>', use index=42).",
     ),
+    expected_text: Optional[str] = Field(None, description="Optional text expected to be present in the element to prevent clicking stale IDs. If provided and mismatched, action fails forcing re-observation."),
     double_click: bool = Field(False, description="Whether to double-click instead of single click."),
     config: RunnableConfig = None,
 ) -> str:
@@ -352,6 +364,11 @@ async def browser_click(
 
         page = await session.get_current_page()
         xpath = element.xpath
+
+        if expected_text:
+            actual_text = await page.evaluate(f"(() => {{ const el = document.evaluate(\"{xpath}\", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue; return el ? (el.innerText || el.value || el.textContent || '') : ''; }})()")
+            if actual_text and expected_text.lower() not in actual_text.lower():
+                return f"[COGNITIVE FAILURE]: Element at index [{index}] contains '{actual_text}' which does not match expected '{expected_text}'. The page re-rendered or index drifted. Observe the current state and try again."
 
         # Use JS click via CDP for reliability
         click_count = 2 if double_click else 1
@@ -392,6 +409,7 @@ async def browser_type(
         description="The index number of the input field from the Interactive Elements map.",
     ),
     text: str = Field(..., description="The text to type into the field."),
+    expected_text: Optional[str] = Field(None, description="Optional label or placeholder text expected in the input to prevent typing in stale IDs."),
     submit: bool = Field(False, description="Press Enter after typing to submit the form."),
     config: RunnableConfig = None,
 ) -> str:
@@ -409,6 +427,11 @@ async def browser_type(
 
         page = await session.get_current_page()
         xpath = element.xpath
+
+        if expected_text:
+            actual_text = await page.evaluate(f"(() => {{ const el = document.evaluate(\"{xpath}\", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue; return el ? (el.placeholder || el.name || el.id || el.innerText || '') : ''; }})()")
+            if actual_text and expected_text.lower() not in actual_text.lower():
+                return f"[COGNITIVE FAILURE]: Input field at index [{index}] identity '{actual_text}' does not match expected '{expected_text}'. The page re-rendered or index drifted. Observe the current state and try again."
 
         # Use JS to focus, clear, and set value via CDP
         escaped_text = text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")

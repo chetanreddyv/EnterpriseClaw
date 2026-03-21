@@ -3,8 +3,8 @@ core/nodes/worker_nodes.py — Nodes for the Worker SubGraph (ephemeral task exe
 
 The Worker operates in a strict Action-Observation loop:
 - `messages` is a lightweight action ledger (tiny strings only).
-- `observation` holds the heavy environment state (A11y tree, terminal output).
-- `observation` is REPLACED each turn, never appended.
+- `environment_snapshot` holds the heavy environment state (A11y tree, terminal output).
+- `environment_snapshot` is REPLACED each turn, never appended.
 - Sequential execution for stateful tools.
 - Concurrent execution for read-only tool sets.
 """
@@ -80,8 +80,9 @@ def _resolve_skill_tools(active_skill_tools: list[str] | None) -> tuple[list, se
 
     tool_names = {name for name in normalized_skill_tools if name in registry_names}
     tool_names.add("escalate_to_supervisor")
+    tool_names.add("complete_task")
 
-    if tool_names == {"escalate_to_supervisor"}:
+    if tool_names == {"escalate_to_supervisor", "complete_task"}:
         logger.warning(
             "WorkerToolBinding: No executable tools declared by matched skills. "
             "Worker will escalate for clarification."
@@ -92,8 +93,8 @@ def _resolve_skill_tools(active_skill_tools: list[str] | None) -> tuple[list, se
         func = GLOBAL_TOOL_REGISTRY.get(name)
         if func:
             tools.append(func)
-        elif name == "escalate_to_supervisor":
-            logger.warning("WorkerToolBinding: escalate_to_supervisor is not registered.")
+        elif name in ("escalate_to_supervisor", "complete_task"):
+            logger.warning(f"WorkerToolBinding: {name} is not registered in GLOBAL_TOOL_REGISTRY.")
 
     return tools, tool_names
 
@@ -352,29 +353,42 @@ def _summarize_tool_result(tool_name: str, result_content: str) -> str:
         return summary
 
     category = _tool_category(tool_name)
-    if category in {"browser", "exec"} and len(summary) > 240:
-        return f"Action successful: {tool_name}."
+    if category in {"browser", "exec"}:
+        return (
+            f"Action dispatched successfully via {tool_name}. "
+            "See environment observation for current state."
+        )
 
     return summary or f"Action successful: {tool_name}."
 
 
-async def _refresh_observation_after_tools(tool_names: list[str], config: RunnableConfig) -> Any | None:
-    """Fetch post-action environment state using category-specific observers."""
-    categories = _observation_categories_for_tools(tool_names)
+async def _refresh_environment_snapshot(categories: set[str], config: RunnableConfig) -> Any | None:
+    """Fetch current environment anchor for requested categories."""
     if not categories:
         return None
 
     browser_state: Any | None = None
-    sections: list[str] = []
+    exec_state: Any | None = None
+
     if "browser" in categories:
         browser_state = await get_browser_environment_state(config)
-        if isinstance(browser_state, list) and "exec" not in categories:
-            return browser_state
-        sections.append(
-            _truncate_observation(_observation_to_prompt_text(browser_state), "browser_snapshot")
-        )
     if "exec" in categories:
         exec_state = await get_exec_environment_state(config)
+
+    if "exec" in categories and "browser" not in categories:
+        return _truncate_observation(_observation_to_prompt_text(exec_state), "exec_command")
+
+    if isinstance(browser_state, list):
+        final_payload: list[dict[str, Any]] = list(browser_state)
+        if exec_state:
+            exec_text = _truncate_observation(_observation_to_prompt_text(exec_state), "exec_command")
+            final_payload.append({"type": "text", "text": f"\n\n💻 Terminal Output:\n{exec_text}"})
+        return final_payload
+
+    sections: list[str] = []
+    if browser_state is not None:
+        sections.append(_truncate_observation(_observation_to_prompt_text(browser_state), "browser_snapshot"))
+    if exec_state is not None:
         sections.append(_truncate_observation(_observation_to_prompt_text(exec_state), "exec_command"))
 
     if not sections:
@@ -388,6 +402,26 @@ async def _refresh_observation_after_tools(tool_names: list[str], config: Runnab
         combined = combined[:MAX_OBSERVATION_CHARS] + "\n...[TRUNCATED]..."
 
     return combined
+
+
+async def worker_refresh_environment_node(state: WorkerState, config: RunnableConfig) -> Dict[str, Any]:
+    """Refresh replace-only ephemeral environment anchor before next model turn."""
+    raw_categories = state.get("_refresh_categories") or []
+    categories = {
+        str(value).strip().lower()
+        for value in raw_categories
+        if str(value).strip().lower() in {"browser", "exec"}
+    }
+
+    update: Dict[str, Any] = {"_refresh_categories": []}
+    if not categories:
+        return update
+
+    latest_observation = await _refresh_environment_snapshot(categories, config)
+    if latest_observation is not None:
+        update["environment_snapshot"] = latest_observation
+
+    return update
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -474,8 +508,8 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
     if not objective:
         objective = "Complete the assigned task."
 
-    observation_raw = state.get("observation", "No environment state available yet.")
-    observation = _observation_to_prompt_text(observation_raw)
+    snapshot_raw = state.get("environment_snapshot", "No environment state available yet.")
+    observation = _observation_to_prompt_text(snapshot_raw)
     step_count = state.get("step_count", 0)
     max_steps = state.get("max_steps", settings.worker_max_steps)
     active_skill_tools = state.get("active_skill_tools") or []
@@ -496,7 +530,7 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
         batch_actions_hint = "- If you need to fill multiple form fields, use the `batch_actions` tool.\n"
 
     escalation_only_hint = ""
-    if available_tool_names == ["escalate_to_supervisor"]:
+    if available_tool_names == ["complete_task", "escalate_to_supervisor"] or available_tool_names == ["escalate_to_supervisor"]:
         escalation_only_hint = (
             "- No executable skills matched this objective. "
             "Call `escalate_to_supervisor` immediately and request missing context.\n"
@@ -519,6 +553,8 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
         f"## Progress\n- Step {step_count + 1} of {max_steps}\n\n"
         f"## Rules\n"
         f"- Take the NEXT action to accomplish your objective.\n"
+        f"- Only perform ONE action per turn. Attempting multiple actions at once is strictly forbidden.\n"
+        f"- Never guess or invent internal URLs (e.g. going directly to `/cart`) if there are visible UI controls to click instead.\n"
         f"{batch_actions_hint}"
         f"{escalation_only_hint}"
         f"- The `Current Environment State` below updates automatically after every action you take. "
@@ -528,15 +564,15 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
         f"- If the exact tool you want is unavailable, use `escalate_to_supervisor` instead of guessing.\n"
         f"- If you are stuck, confused, or the environment is not responding, "
         f"use `escalate_to_supervisor` immediately instead of looping.\n"
-        f"- When the task is complete, respond with a summary of what you accomplished.\n"
+        f"- When the task is complete, you MUST call the `complete_task` tool with a summary of what you accomplished. Do not just reply with text.\n"
     )
 
     sys_msg = SystemMessage(content=system_prompt, id="worker_system_msg")
     observation_header = "## Current Environment State\n"
-    if isinstance(observation_raw, list):
+    if isinstance(snapshot_raw, list):
         # Multimodal observations must be sent in a HumanMessage, not a SystemMessage.
         observation_payload: list[dict[str, Any] | str] = [{"type": "text", "text": observation_header}]
-        observation_payload.extend(observation_raw)
+        observation_payload.extend(snapshot_raw)
         observation_msg = HumanMessage(content=observation_payload, id="worker_observation_msg")
     else:
         observation_msg = HumanMessage(
@@ -614,7 +650,15 @@ async def worker_executor_node(state: WorkerState, config: RunnableConfig) -> Di
         }
 
     llm = init_agent_llm(state.get("active_model", ""))
-    llm_with_tools = llm.bind_tools(all_tools) if all_tools else llm
+    if all_tools:
+        # Prevent parallel tool calls context poisoning for single-action models where supported.
+        kwargs = {}
+        active_model = state.get("active_model", "")
+        if settings.strict_action_loop and active_model.startswith("openai/"):
+            kwargs["parallel_tool_calls"] = False
+        llm_with_tools = llm.bind_tools(all_tools, **kwargs)
+    else:
+        llm_with_tools = llm
 
     try:
         invoke_start = time.perf_counter()
@@ -734,6 +778,7 @@ def _cron_auto_approved_tools(state: WorkerState) -> set[str]:
     declared = set(_normalize_tool_names(state.get("active_skill_tools") or []))
     # Escalation sentinel should always stay callable.
     declared.add("escalate_to_supervisor")
+    declared.add("complete_task")
     return declared
 
 
@@ -771,7 +816,7 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
         )
 
     tool_messages = []
-    latest_observation = None  # Will hold the LAST observation (replaces, not appends)
+    latest_observation = None  # Will hold the LAST observation (replace-only ephemeral anchor)
     executed_tool_names: list[str] = []
     tool_calls = list(last_message.tool_calls)
 
@@ -788,6 +833,46 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
                 "status": "escalated",
                 "result_summary": reason,
             }
+        if tool_call["name"] == "complete_task":
+            summary = tool_call["args"].get("summary", "Task completed via tool call.")
+            tool_messages.append(ToolMessage(
+                content=f"Task completed: {summary}",
+                tool_call_id=tool_call["id"],
+            ))
+            return {
+                "messages": tool_messages,
+                "status": "completed",
+                "result_summary": summary,
+            }
+
+    # ── Enforce Cardinality Guard ──
+    if settings.strict_action_loop:
+        stateful_count = 0
+        allowed_tool_calls = []
+        truncated_tool_calls = []
+        for tc in tool_calls:
+            if _is_stateful_tool(tc["name"]) and tc["name"] != "batch_actions":
+                if stateful_count == 0:
+                    allowed_tool_calls.append(tc)
+                    stateful_count += 1
+                else:
+                    truncated_tool_calls.append(tc)
+            else:
+                allowed_tool_calls.append(tc)
+
+        if truncated_tool_calls:
+            logger.warning(
+                "WorkerHITL: Cardinality guard dropped %d tool(s): %s", 
+                len(truncated_tool_calls), 
+                [t['name'] for t in truncated_tool_calls]
+            )
+            # Synthesize fake failed tool messages to prevent LLM hallucination
+            for tc in truncated_tool_calls:
+                tool_messages.append(ToolMessage(
+                    content="[SYSTEM ERROR]: Tool execution blocked. You violated the strict one-action-per-turn rule. Observe the current state and try again.",
+                    tool_call_id=tc["id"]
+                ))
+            tool_calls = allowed_tool_calls
 
     # ── Domain-aware execution ──
     run_sequential = any(_is_stateful_tool(tc["name"]) for tc in tool_calls)
@@ -942,14 +1027,9 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
             summary = _summarize_tool_result(action_name, str(result_content))
             tool_messages.append(ToolMessage(content=summary, tool_call_id=call_id))
 
-    latest_observation = await _refresh_observation_after_tools(executed_tool_names, config)
-
-    # Build update payload
+    # Build update payload: action ledger updates only.
     update_payload: Dict[str, Any] = {"messages": tool_messages}
-
-    # REPLACE observation (State Amnesia) — only if a tool returned one
-    if latest_observation is not None:
-        update_payload["observation"] = latest_observation
+    update_payload["_refresh_categories"] = sorted(_observation_categories_for_tools(executed_tool_names))
 
     return update_payload
 
@@ -966,7 +1046,7 @@ async def worker_summarize_node(state: WorkerState) -> Dict[str, Any]:
     """
     existing_status = state.get("status")
     existing_summary = (state.get("result_summary") or "").strip()
-    if existing_status in {"failed", "escalated"} and existing_summary:
+    if existing_status in {"failed", "escalated", "completed"} and existing_summary:
         return {
             "status": existing_status,
             "result_summary": existing_summary,
