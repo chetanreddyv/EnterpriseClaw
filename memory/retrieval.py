@@ -4,6 +4,7 @@ memory/gate.py — MemoryGate: High-level orchestrator for memory extraction and
 This is the main interface used by app.py and worker.py.
 """
 
+import asyncio
 import logging
 
 from .db import DatabaseClient
@@ -18,15 +19,32 @@ class MemoryRetrieval:
     def __init__(self):
         self.db = DatabaseClient()
         self.store = ZvecMemoryStore(db_client=self.db)
+        self._initialized = False
+        self._initialize_lock: asyncio.Lock | None = None
 
     async def initialize(self):
         """Must be called at application startup."""
-        self.db.initialize()
-        self.store.initialize()
-        # If corruption was detected, rebuild the vector index from durable SQLite
-        if self.store._needs_rebuild:
-            await self.store.rebuild_from_sqlite()
-        await self.store.initialize_skills()
+        if self._initialized:
+            logger.debug("MemoryRetrieval: initialize() skipped; already initialized.")
+            return
+
+        if self._initialize_lock is None:
+            self._initialize_lock = asyncio.Lock()
+
+        async with self._initialize_lock:
+            if self._initialized:
+                logger.debug("MemoryRetrieval: initialize() skipped inside lock; already initialized.")
+                return
+
+            self.db.initialize()
+            # CRITICAL FIX: store.initialize() is now properly awaited
+            # to prevent blocking the event loop on startup.
+            await self.store.initialize()
+            # If corruption was detected, rebuild the vector index from durable SQLite
+            if self.store._needs_rebuild:
+                await self.store.rebuild_from_sqlite()
+            await self.store.initialize_skills()
+            self._initialized = True
 
     # (process() method removed to replace background extraction with active tools)
 

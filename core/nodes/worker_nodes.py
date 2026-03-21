@@ -25,6 +25,7 @@ from langchain_core.runnables import RunnableConfig
 from core.graphs.states import WorkerState
 from core.llm import init_agent_llm, is_llm_connection_error
 from core.observers import get_browser_environment_state, get_exec_environment_state
+from core.errors import InfrastructureError
 from mcp_servers import (
     GLOBAL_TOOL_REGISTRY,
     GLOBAL_TOOL_METADATA,
@@ -43,6 +44,15 @@ TOOL_ERROR_PREFIXES = (
     "❌",
     "action failed",
 )
+
+
+def _build_infrastructure_failure_summary(error: InfrastructureError) -> str:
+    """Normalize fatal infrastructure summaries returned to the Supervisor."""
+    return (
+        "System Infrastructure Failure: "
+        f"{str(error).strip()}. "
+        "The task was aborted to prevent token burn."
+    )
 
 
 def _normalize_tool_names(raw_tool_names: list[str] | None) -> list[str]:
@@ -550,15 +560,15 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
         id="worker_objective_anchor",
     )
 
-    logger.info("🌀"*80)
+    logger.info("🌀")
     logger.info("🌀 [WORKER TRACE: PROMPT]")
     logger.info(f"🌀 🎯 Objective: {objective}")
     logger.info(f"🌀 📍 Step: {step_count + 1}/{max_steps} | Model: {state.get('active_model') or 'default'}")
     logger.info(f"🌀 🧩 Active Skills: {state.get('active_skills') or 'None Matched'}")
     logger.info(f"🌀 👁️ Observation: {len(observation)} chars")
     logger.info(f"🌀 📜 History: {len(history)} messages.")
-    logger.info(f"🌀 📋 Prompt Structure: [System] → [Objective] → [History] → [Observation]")
-    logger.info("🌀"*80)
+    logger.info("🌀 📋 Prompt Structure: [System] → [Objective] → [History] → [Observation]")
+    logger.info("🌀")
 
     return {
         "_formatted_prompt": [sys_msg] + [objective_anchor] + history + [observation_msg],
@@ -624,13 +634,13 @@ async def worker_executor_node(state: WorkerState, config: RunnableConfig) -> Di
             content_str = str(content).strip()
 
         # ── [LOGGING] WORKER OUTPUT BLOCK ──
-        logger.info("⚡"*80)
+        logger.info("⚡")
         logger.info("⚡ [WORKER: ACTION]")
         if getattr(result, "tool_calls", []):
             logger.info(f"⚡ 🛠 Action: {[tc['name'] for tc in result.tool_calls]}")
         if content_str:
             logger.info(f"⚡ 📝 Response: {content_str}")
-        logger.info("⚡"*80)
+        logger.info("⚡")
 
         if not content_str and not getattr(result, "tool_calls", []):
             logger.warning("WorkerExecutor: Blank generation detected.")
@@ -698,6 +708,8 @@ async def _execute_single_tool(action_name: str, tool_args: dict, config: Runnab
                 return str(result)
         return str(result)
 
+    except InfrastructureError:
+        raise
     except Exception as e:
         logger.error(f"  -> Worker tool {action_name} failed: {e}")
         return f"Error executing {action_name}: {e}"
@@ -835,7 +847,20 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
             logger.info(f"🛠️ Worker executing (sequential): {action_name}")
             executed_tool_names.append(action_name)
 
-            result_content = await _execute_single_tool(action_name, tool_call["args"], config)
+            try:
+                result_content = await _execute_single_tool(action_name, tool_call["args"], config)
+            except InfrastructureError as fatal_err:
+                logger.error(
+                    "WorkerCircuitBreaker: fatal infrastructure error in tool %s: %s",
+                    action_name,
+                    fatal_err,
+                )
+                return {
+                    "status": "failed",
+                    "result_summary": _build_infrastructure_failure_summary(fatal_err),
+                    "tool_failure_count": 0,
+                    "_retry": False,
+                }
 
             # Handle exceptions as strings
             if isinstance(result_content, str) and _looks_like_tool_error(result_content):
@@ -893,6 +918,19 @@ async def worker_tools_node(state: WorkerState, config: RunnableConfig) -> Dict[
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         executed_tool_names.extend(tc["name"] for tc in executable_tool_calls)
+
+        for result_content in results:
+            if isinstance(result_content, InfrastructureError):
+                logger.error(
+                    "WorkerCircuitBreaker: fatal infrastructure error during concurrent tools: %s",
+                    result_content,
+                )
+                return {
+                    "status": "failed",
+                    "result_summary": _build_infrastructure_failure_summary(result_content),
+                    "tool_failure_count": 0,
+                    "_retry": False,
+                }
 
         for tool_call, result_content in zip(executable_tool_calls, results):
             call_id = tool_call["id"]

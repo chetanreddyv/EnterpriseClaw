@@ -6,7 +6,14 @@ tools: browser_navigate, browser_click, browser_type, browser_screenshot, browse
 
 ### TRIGGER_EXAMPLES
 - "open a browser"
+- "open instacart"
+- "go to instacart.com"
+- "visit costco on instacart and add items to cart"
+- "go to a website and complete a task"
+- "visit an ecommerce site and buy groceries"
 - "navigate to google.com"
+- "visit youtube.com"
+- "open amazon.com and browse products"
 - "click the sign in button on the page"
 - "fill out the search box with 'EnterpriseClaw'"
 - "take a screenshot of the current page"

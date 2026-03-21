@@ -55,7 +55,7 @@ def route_after_worker_executor(state: WorkerState) -> str:
 def route_after_worker_tools(state: WorkerState) -> str:
     """After tools finish, check if we should continue or stop."""
     # Check for escalation
-    if state.get("status") == "escalated":
+    if state.get("status") in {"escalated", "failed"}:
         return "summarize"
 
     # Check step limit
@@ -70,6 +70,9 @@ def route_after_worker_tools(state: WorkerState) -> str:
 
 def route_after_worker_error(state: WorkerState) -> str:
     """After error handling, check if we should retry or give up."""
+    if state.get("status") in {"failed", "escalated"}:
+        return "summarize"
+
     if not state.get("_retry"):
         return "summarize"
 

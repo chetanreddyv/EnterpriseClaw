@@ -464,7 +464,7 @@ async def supervisor_tools_node(state: SupervisorState, config: RunnableConfig) 
             if objective_key and objective_key in escalated_objectives:
                 tool_messages.append(ToolMessage(
                     content=(
-                        "⚠️ Delegation blocked: this objective already escalated in the current turn. "
+                        "⚠️ Delegation blocked: this objective already escalated or hit infrastructure failure in the current turn. "
                         "Ask the user for clarification or adjust the objective before retrying."
                     ),
                     tool_call_id=call_id,
@@ -498,8 +498,11 @@ async def supervisor_tools_node(state: SupervisorState, config: RunnableConfig) 
                     result = await result
 
             result_text = str(result)
-            if action_name == "delegate_task" and objective_key and result_text.startswith("⚠️ WORKER ESCALATED:"):
-                escalated_objectives.add(objective_key)
+            if action_name == "delegate_task" and objective_key:
+                if result_text.startswith("⚠️ WORKER ESCALATED:"):
+                    escalated_objectives.add(objective_key)
+                elif result_text.startswith("🛑 WORKER INFRASTRUCTURE FAILURE:"):
+                    escalated_objectives.add(objective_key)
 
             tool_messages.append(ToolMessage(content=result_text, tool_call_id=call_id))
         except GraphBubbleUp:

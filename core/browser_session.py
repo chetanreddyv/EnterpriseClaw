@@ -14,6 +14,7 @@ from typing import Any, Dict
 
 from browser_use.browser.session import BrowserSession
 from browser_use.dom.views import EnhancedDOMTreeNode
+from core.errors import InfrastructureError
 
 logger = logging.getLogger("core.browser_session")
 
@@ -38,6 +39,18 @@ class BrowserSessionManager:
     GC_INTERVAL_SECONDS = 600
     IDLE_TIMEOUT_SECONDS = 1800
     _EMPTY_DOM_MARKER = "empty dom tree"
+    _INFRA_ERROR_MARKERS = (
+        "browser not connected",
+        "connection refused",
+        "target closed",
+        "browser has been closed",
+        "websocket",
+        "disconnected",
+        "cdp",
+        "session closed",
+        "context closed",
+        "transport closed",
+    )
 
     @staticmethod
     def _unwrap_iife(script: str) -> str:
@@ -103,6 +116,39 @@ class BrowserSessionManager:
         if not text:
             return True
         return cls._EMPTY_DOM_MARKER in text.lower()
+
+    @classmethod
+    def is_infrastructure_exception(cls, error: Exception | str) -> bool:
+        """Return True when an exception indicates dead/unreachable browser infrastructure."""
+        text = str(error or "").strip().lower()
+        if not text:
+            return False
+        return any(marker in text for marker in cls._INFRA_ERROR_MARKERS)
+
+    @classmethod
+    def to_infrastructure_error(cls, operation: str, error: Exception) -> InfrastructureError | None:
+        """Translate browser runtime failures into typed infrastructure faults when applicable."""
+        if not cls.is_infrastructure_exception(error):
+            return None
+
+        reason = str(error).strip() or type(error).__name__
+        return InfrastructureError(
+            f"Browser infrastructure is unavailable during {operation}: {reason}"
+        )
+
+    @classmethod
+    async def assert_session_healthy(cls, timeout_seconds: float = 2.0) -> None:
+        """Raise InfrastructureError when the active browser session is not responsive."""
+        session = await cls.get_session()
+        try:
+            await asyncio.wait_for(session.get_current_page_url(), timeout=timeout_seconds)
+        except Exception as error:
+            infra_error = cls.to_infrastructure_error("health-check", error)
+            if infra_error:
+                raise infra_error from error
+            raise InfrastructureError(
+                f"Browser infrastructure health check failed: {type(error).__name__} - {error}"
+            ) from error
 
     @classmethod
     async def _ensure_session(cls):

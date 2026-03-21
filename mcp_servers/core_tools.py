@@ -111,6 +111,9 @@ async def delegate_task(
         logger.warning(f"⚠️ Worker escalated: {summary}")
         return f"⚠️ WORKER ESCALATED: {summary}"
     elif status == "failed":
+        if str(summary).strip().lower().startswith("system infrastructure failure:"):
+            logger.error(f"🛑 Worker infrastructure failure: {summary}")
+            return f"🛑 WORKER INFRASTRUCTURE FAILURE: {summary}"
         logger.error(f"❌ Worker failed: {summary}")
         return f"❌ Task failed: {summary}"
 
