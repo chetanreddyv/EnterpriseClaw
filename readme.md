@@ -1,157 +1,312 @@
 # EnterpriseClaw
 
-EnterpriseClaw is a production-oriented agent orchestration framework built on LangGraph.
-It separates decision-making (Supervisor) from execution (Worker), adds human approval for risky actions, and keeps durable memory in SQLite + vector indexes.
+EnterpriseClaw is a production-focused agent orchestration system built on LangGraph.
 
-This repository contains everything needed to run the assistant locally through Telegram, WhatsApp, a web endpoint, or CLI.
+It is designed around one core idea:
 
-## At a glance
+- Keep orchestration deterministic.
+- Keep model reasoning flexible.
 
-- Deterministic Supervisor/Worker graph architecture.
-- Tiered Human-In-The-Loop (HITL) safety for tool execution.
-- Persistent state via SQLite checkpointing.
-- Long-term memory via SQLite + Zvec vector retrieval.
-- Dynamic tool plugin loading from `mcp_servers/`.
-- Dynamic skill retrieval from `skills/`.
-- Browser automation with Playwright and per-thread sessions.
-- Optional Google Workspace (Gmail/Calendar) tool integration.
+In practice, this means:
 
-## What this repo includes
+- The Supervisor handles conversation, memory context, and delegation.
+- The Worker executes objectives in a strict action-observation loop.
+- Heavy environment state is replaced each turn (not accumulated forever).
+- Tool safety, routing, and failure behavior are explicit and testable.
 
-### Core runtime
+## Why This Project Exists
 
-- `app.py`: FastAPI entrypoint, Telegram/WhatsApp polling, webhook handling, graph lifecycle.
+Most agent stacks fail in one of these ways:
+
+- Context windows bloat over long tasks.
+- Browser agents drift on dynamic UIs.
+- Tool usage is too permissive or too rigid.
+- Infrastructure failures burn tokens and loop forever.
+
+EnterpriseClaw addresses these directly with deterministic graph routing, replace-only environment anchors, strict tool policy, and typed failure handling.
+
+## Core Architecture
+
+### 1. Supervisor (persistent orchestrator)
+
+The Supervisor graph is user-facing and stateful.
+
+Responsibilities:
+
+- Ingest user input.
+- Retrieve long-term context.
+- Build the high-level prompt.
+- Use only a fixed, narrow tool set.
+- Delegate complex execution via `delegate_task(objective=...)`.
+
+Primary flow:
+
+- Intent -> Prompt Builder -> Executor -> Tools/Compact -> END
+
+Code:
+
+- `core/graphs/supervisor.py`
+- `core/nodes/supervisor_nodes.py`
+
+### 2. Worker (ephemeral executor)
+
+The Worker graph is delegated, objective-bound, and execution-focused.
+
+Responsibilities:
+
+- Retrieve matching skills once at start.
+- Build action-observation prompts.
+- Execute tool calls under strict policy.
+- Refresh current environment snapshot.
+- Summarize result and return to Supervisor.
+
+Primary flow:
+
+- Skill Context -> Prompt Builder -> Executor -> Tools -> Refresh Environment -> Prompt Builder (loop) -> Summarize -> END
+
+Code:
+
+- `core/graphs/worker.py`
+- `core/nodes/worker_nodes.py`
+
+## Deterministic State Management (Efficiency + Reliability)
+
+EnterpriseClaw uses a two-zone state model in Worker sessions.
+
+### Zone A: Action Ledger (`messages`)
+
+This is lightweight and append-only.
+
+- Stores short action summaries and tool traces.
+- Avoids dumping heavy raw state into history.
+- Keeps token usage stable across long loops.
+
+### Zone B: Ephemeral Anchor (`environment_snapshot`)
+
+This is heavy, current reality, and replace-only.
+
+- Contains current browser/terminal state.
+- Replaced every refresh cycle.
+- Never treated as permanent chat history.
+
+Result:
+
+- The model sees current ground truth without stale state pollution.
+- Prompt growth is controlled.
+- Attention is focused on now, not old screenshots/text maps.
+
+State schema:
+
+- `core/graphs/states.py`
+
+## Context Management Strategy
+
+### Prompt assembly is deliberate
+
+Worker prompt builder composes context in this order:
+
+- System rules and execution constraints.
+- Objective anchor.
+- Valid history tail (pair-safe for tool calls/results).
+- Current environment snapshot at the end.
+
+This ordering preserves recency and prevents tool-message orphaning.
+
+Key logic:
+
+- `_coerce_valid_worker_history(...)`
+- `_build_worker_history_tail(...)`
+- `_observation_to_prompt_text(...)`
+
+Code:
+
+- `core/nodes/worker_nodes.py`
+
+## Memory System (Hybrid, Durable, and Fast)
+
+EnterpriseClaw memory has two layers:
+
+### 1. Durable source of truth: SQLite
+
+`memory/db.py` stores:
+
+- Thread history (`thread_history`).
+- Long-term memory items (`memory_items`) with lifecycle state.
+- FTS5 keyword index (`memory_fts`) for BM25 retrieval.
+
+Important properties:
+
+- WAL mode and tuned pragmas for concurrency.
+- FTS integrity checks and rebuild support.
+- Active/tombstoned item lifecycle.
+
+### 2. Semantic retrieval layer: Zvec + FastEmbed
+
+`memory/vectorstore.py` provides:
+
+- Semantic retrieval over memory items.
+- Hybrid ranking using semantic + FTS via Reciprocal Rank Fusion (RRF).
+- Time-decay weighting for freshness.
+- Async initialization and corruption recovery.
+- Bounded embedding concurrency with semaphore.
+
+### 3. Retrieval gateway
+
+`memory/retrieval.py` merges:
+
+- Recent conversation history.
+- Relevant semantic memory context.
+- Skill retrieval with metadata.
+
+This gives strong recall without flooding prompt context.
+
+## Skill System (JIT and Tool-Scoped)
+
+Skills live in `skills/*/skill.md` and include frontmatter metadata:
+
+- `name`
+- `description`
+- `tools`
+- trigger examples
+
+Worker start behavior:
+
+- Retrieve top-matching skills for objective.
+- Parse declared tools from skill frontmatter.
+- Bind only resolved tools (+ `escalate_to_supervisor`, `complete_task`).
+- If nothing executable is resolved, escalate instead of guessing.
+
+This prevents broad tool exposure and reduces hallucinated tool calls.
+
+Code:
+
+- `memory/vectorstore.py`
+- `core/nodes/worker_nodes.py`
+
+## Browser Perception and Action Grounding
+
+Browser automation is built around browser-use + CDP-backed state extraction.
+
+### Session profile defaults
+
+`core/browser_session.py` configures:
+
+- 1920x1080 viewport.
+- `device_scale_factor=1.0`.
+- highlighted elements enabled for Set-of-Marks grounding.
+- per-thread session tracking.
+- idle GC for stale thread contexts.
+
+### Observation model
+
+`core/observers.py` returns browser state as:
+
+- text map (AXTree-derived via browser-use state pipeline), and
+- screenshot block (JPEG, quality 60),
+
+with safe fallback to text-only if screenshot fails.
+
+### Dynamic UI drift protection
+
+`mcp_servers/browser_tools.py` supports `expected_text` checks in write actions.
+
+- If element index content does not match expectation, action aborts with explicit cognitive failure.
+- This protects against index drift on dynamic SPAs.
+
+### Scroll correctness
+
+Scrolling uses runtime viewport height (not hardcoded pixel jumps), improving consistency across layouts.
+
+## Safety and Deterministic Execution Guards
+
+### HITL policy tiers
+
+`core/hitl.py` applies tiered approval:
+
+- Autonomous: always allowed.
+- Allowed: allowed by default, can be denied.
+- Not allowed: requires explicit permit/approval.
+
+Unknown tools default to strict handling.
+
+### Cardinality guard
+
+Worker strict action loop enforces one stateful action per turn.
+
+- Extra stateful calls are dropped.
+- System error feedback is injected so the model can reconcile.
+
+### Failure split: cognitive vs infrastructure
+
+- Cognitive/tool errors are returned to model context for correction.
+- Infrastructure failures (dead browser/session transport issues) trip a circuit breaker and stop execution to prevent token burn.
+
+Code:
+
+- `core/errors.py`
+- `core/browser_session.py`
+- `core/nodes/worker_nodes.py`
+
+## Scheduling and Background Jobs
+
+`core/scheduler.py` implements persistent async scheduling with:
+
+- at/every/cron schedule modes.
+- atomic JSON persistence (`data/cron/jobs.json`).
+- bounded run history (`data/cron/runs`).
+- isolated worker execution per job.
+- optional prebound skill execution path.
+
+The scheduler is backend-owned; the model uses scheduling tools rather than implementing scheduling logic itself.
+
+## Tool Plugin Runtime
+
+Tools are loaded dynamically from `mcp_servers/`.
+
+`mcp_servers/__init__.py`:
+
+- discovers plugin modules.
+- imports each module `TOOL_REGISTRY`.
+- builds global registry + metadata.
+- assigns execution characteristics (category/stateful mode/observation mode).
+
+This keeps tool surface extensible while preserving deterministic runtime categorization.
+
+## Interfaces
+
+EnterpriseClaw supports multiple front doors:
+
+- Telegram (`interfaces/telegram.py`)
+- WhatsApp bridge (`interfaces/whatsapp.py`)
+- Web chat (`interfaces/web_chat.py`, `templates/`, `static/`)
+- CLI (`interfaces/cli.py`)
+
+The FastAPI app and graph lifecycle are managed in `app.py`.
+
+## Project Layout
+
+- `app.py`: FastAPI entrypoint + runtime wiring.
 - `config/settings.py`: environment configuration.
-- `core/graphs/`: LangGraph Supervisor and Worker graph definitions.
-- `core/nodes/`: prompt building, executor, tool nodes, compaction, error handling.
-- `core/hitl.py`: tool approval tier rules.
-- `core/channel_manager.py`: routes responses/approvals to platform adapters.
+- `core/graphs/`: Supervisor/Worker graph definitions.
+- `core/nodes/`: node implementations and routing behaviors.
+- `core/browser_session.py`: browser-use session manager.
+- `core/observers.py`: environment observation adapters.
+- `core/hitl.py`: approval policy engine.
+- `core/scheduler.py`: background scheduler service.
+- `mcp_servers/`: tool plugins.
+- `memory/`: DB + vector index + retrieval.
+- `skills/`: skill packs used for JIT binding.
+- `tests/`: architecture, tools, memory, scheduler, and integration tests.
 
-### Interfaces
-
-- `interfaces/telegram.py`: Telegram adapter (messages + approval buttons).
-- `interfaces/whatsapp.py`: WhatsApp adapter backed by a Node.js WebSocket bridge.
-- `interfaces/web_chat.py`: web UI route and web adapter scaffold.
-- `interfaces/cli.py`: terminal adapter.
-- `templates/chat.html`, `static/css/chat.css`, `static/js/chat.js`: web chat frontend.
-
-### Tool system
-
-- `mcp_servers/__init__.py`: dynamic plugin loader + global tool registry.
-- `mcp_servers/core_tools.py`: delegation, reminders, memory save, batching.
-- `mcp_servers/web_tools.py`: web search/fetch.
-- `mcp_servers/browser_tools.py`: Playwright browser automation tools.
-- `mcp_servers/exec_tools.py`: shell command execution.
-- `mcp_servers/google_workspace.py`: Gmail/Calendar tools.
-
-### Memory
-
-- `memory/db.py`: SQLite storage for conversation history + durable memory items.
-- `memory/vectorstore.py`: Zvec + FastEmbed indexing/retrieval + skill indexing.
-- `memory/retrieval.py`: high-level memory retrieval service.
-
-### Skills
-
-- `skills/identity/skill.md`: base assistant identity prompt.
-- `skills/*/skill.md`: task-specific behavior modules used by Worker JIT retrieval.
-
-### Setup and scripts
-
-- `scripts/onboarding.py`: setup wizard (web and CLI modes).
-- `scripts/google_auth_helper.py`: OAuth helper for Google Workspace tools.
-
-### Tests
-
-- `tests/`: browser tools, memory system, worker architecture, tool behavior, zvec checks.
-
-## Architecture diagram
-
-```mermaid
-flowchart LR
-    %% ===== Clean Minimalist Styling =====
-    classDef client fill:#FFFFFF,stroke:#333333,stroke-width:2px,color:#000000,rx:10,ry:10
-    classDef gateway fill:#E9F4FF,stroke:#2D6EA8,stroke-width:2px,color:#11324D,rx:10,ry:10
-    classDef supervisor fill:#EAF9EF,stroke:#2D8A57,stroke-width:2px,color:#0F3F25,rx:10,ry:10
-    classDef worker fill:#F3E5F5,stroke:#4A148C,stroke-width:2px,color:#311B92,rx:10,ry:10
-    classDef tools fill:#FFF0E3,stroke:#C25A00,stroke-width:2px,color:#4A2200,rx:10,ry:10
-    classDef memory fill:#FCEEF2,stroke:#B23A5A,stroke-width:2px,color:#4A1120,rx:10,ry:10
-
-    %% ===== Nodes =====
-    C(["📱 Clients 
-    (Telegram, Web, CLI)"]):::client
-    G(["🌐 API Gateway
-    (FastAPI & Channels)"]):::gateway
-    S(["🧠 Supervisor
-    (Persistent Orchestrator)"]):::supervisor
-    W(["⚡ Worker
-    (Ephemeral Executor)"]):::worker
-    T(["🛠️ Tool Runtime
-    (& HITL Gate)"]):::tools 
-    M(["📚 Memory & Skills
-    (Vector + SQLite)"]):::memory
-
-    %% ===== Main User Flow (Thick Lines) =====
-    C <==> G
-    G <==>|"Chat Flow"| S
-    S ==>|"delegate_task(objective)"| W
-    W ==>|"result_summary"| S
-
-    %% ===== Execution Loop =====
-    W <==>|"Action / Observation"| T
-    
-    %% ===== Secondary/Background Flows (Dotted Lines) =====
-    T -.->|"HITL Approval Request"| G
-    S -.->|"Fetch Context"| M
-    W -.->|"Fetch Matched Skills"| M
-```
-
-Key design idea: the Supervisor handles conversation and memory context, while the Worker handles multi-step execution using objective-matched skills with strict tool binding.
-
-## Safety model (HITL)
-
-Tools are split into three tiers in `core/hitl.py`:
-
-1. `autonomous`: always run without approval.
-2. `allowed`: auto-approved by default, can be locked with `/deny`.
-3. `not_allowed`: requires approval unless explicitly `/permit`-ed.
-
-Examples:
-
-- Autonomous: `web_search`, `web_fetch`, `browser_get_text`, `browser_snapshot`.
-- Allowed by default: `delegate_task`, `browser_navigate`.
-- Approval-gated: `browser_click`, `browser_type`, `browser_file_upload`, `exec_command`, `batch_actions`.
-
-## Delegation contract
-
-The Supervisor delegates complex work using:
-
-```python
-delegate_task(
-    objective="Clear task description",
-    max_steps=15,
-)
-```
-
-The Worker retrieves relevant skills for the objective and binds only the union of tool names declared in those skills' frontmatter. If no executable tools are resolved, it escalates immediately.
-
-Worker safeguards:
-
-- hard step limit,
-- escalation path via `escalate_to_supervisor`,
-- no fallback to broad tool scopes when skill binding is empty,
-- stateful tools executed sequentially,
-- heavy environment observation replaced each turn (prevents prompt bloat).
-
-## Quick start
+## Setup
 
 ### 1. Prerequisites
 
 - Python 3.12+
-- `uv` package manager
-- Chrome/Chromium available for browser tools
-- API keys (at minimum Google + Telegram for default startup gate)
+- `uv`
+- Chromium (for browser tools)
 
-### 2. Install dependencies
+### 2. Install
 
 ```bash
 git clone https://github.com/chetanreddyv/EnterpriseClaw.git
@@ -162,25 +317,25 @@ uv run playwright install chromium
 
 ### 3. Configure environment
 
-Recommended (wizard):
+Guided wizard (sets up API keys and browsers automatically):
 
 ```bash
-uv run python scripts/onboarding.py
+make setup
 ```
 
-CLI fallback:
+Or without Make:
 
 ```bash
-uv run python scripts/onboarding.py --cli
+uv run onboard
 ```
 
-Manual setup:
+Manual baseline:
 
 ```bash
 cp .env.example .env
 ```
 
-Minimum keys to pass startup checks in current code:
+Common required keys:
 
 - `GOOGLE_API_KEY`
 - `TELEGRAM_BOT_TOKEN`
@@ -188,35 +343,30 @@ Minimum keys to pass startup checks in current code:
 Common optional keys:
 
 - `OPENAI_API_KEY`
-- `LM_STUDIO_BASE_URL` (default local OpenAI-compatible endpoint)
+- `LM_STUDIO_BASE_URL`
 - `LM_STUDIO_API_KEY`
-- `GOOGLE_TOKEN_JSON` (base64 token for Google Workspace APIs)
-- `ALLOWED_CHAT_IDS`
-- `TELEGRAM_SECRET_TOKEN`
+- `GOOGLE_TOKEN_JSON`
 - `WHATSAPP_ENABLED`
 - `WHATSAPP_BRIDGE_URL`
 - `WHATSAPP_BRIDGE_TOKEN`
-- `WHATSAPP_ALLOW_FROM`
+- `ALLOWED_CHAT_IDS`
+- `TELEGRAM_SECRET_TOKEN`
 
-### 4. Optional: Google Workspace auth
-
-If you want Gmail/Calendar tools:
+### 4. Optional Google Workspace auth
 
 ```bash
 uv run python scripts/google_auth_helper.py
 ```
 
-Then either keep `token.json` in `scripts/` for local use, or base64-encode it into `GOOGLE_TOKEN_JSON` for deployed environments.
-
 ### 5. Run
 
-API server:
+API:
 
 ```bash
 uv run python app.py
 ```
 
-CLI mode:
+CLI:
 
 ```bash
 uv run python app.py --cli
@@ -228,123 +378,29 @@ Health check:
 curl http://127.0.0.1:8000/health
 ```
 
-## Chat commands tutorial
+## Chat Commands
 
-EnterpriseClaw supports thread-scoped slash commands in Telegram, Web chat, and CLI.
-These commands only affect the current thread/session unless noted otherwise.
+Thread-scoped runtime commands:
 
-### 1) List configured model providers
+- `/models`: list configured providers.
+- `/model <provider/model>`: switch active model for current thread.
+- `/tools`: inspect tool policy.
+- `/permit <tool_name>`: allow tool.
+- `/deny <tool_name>`: deny tool.
+- `/cron`, `/cron list`, `/cron cancel <job_id>`, `/cron cancel all`: manage jobs.
 
-Use:
-
-```text
-/models
-```
-
-What it does:
-
-- Shows which providers are currently configured from your environment.
-- Typical values: `openai`, `google`, `claude`, `lm_studio`.
-
-### 2) Switch the active model for this thread
-
-Use:
-
-```text
-/model <provider/model>
-```
-
-Examples:
-
-```text
-/model lmstudio/qwen/qwen3.5
-/model openai/gpt-4o
-/model google_genai/gemini-2.5-flash
-/model anthropic/claude-3-5-sonnet-20241022
-```
-
-What it does:
-
-- Hot-swaps the model used for subsequent turns in this thread.
-
-### 3) Inspect tool permission policy
-
-Use:
-
-```text
-/tools
-```
-
-What it does:
-
-- Displays tool policy for the current thread, including autonomous, allowed, permitted, and approval-required tools.
-
-### 4) Override tool approval behavior
-
-Use:
-
-```text
-/permit <tool_name>
-/deny <tool_name>
-```
-
-Examples:
-
-```text
-/permit browser_click
-/deny exec_command
-```
-
-What it does:
-
-- `/permit`: marks a tool as auto-approved for this thread.
-- `/deny`: forces approval for that tool in this thread.
-
-### 5) Manage scheduled jobs with `/cron`
-
-Use:
-
-```text
-/cron
-/cron list
-/cron cancel <job_id>
-/cron cancel all
-/cron cancel-all
-/cron help
-```
-
-What it does:
-
-- `/cron` or `/cron list`: lists all scheduled jobs.
-- `/cron cancel <job_id>`: cancels one scheduled job.
-- `/cron cancel all` or `/cron cancel-all`: cancels every scheduled job.
-- `/cron help`: shows quick cron command help.
-
-To create tasks, use natural-language requests such as:
-
-- "Schedule a background task to check AI engineer jobs every day at 9 AM."
-- "Cancel all scheduled cron jobs."
-
-Scheduler tools behind the scenes: `schedule_background_task`, `list_scheduled_tasks`, `cancel_task`.
-
-### Command tips
-
-- Slash commands are case-insensitive (`/MODELS` works too).
-- Commands that need arguments must include them (for example `/model <provider/model>`).
-- Use `/tools` first if you are not sure what tool name to pass to `/permit` or `/deny`.
-
-## API surface
+## API Surface
 
 Main endpoints in `app.py`:
 
 - `GET /health`
-- `POST /webhook` (Telegram webhook)
+- `POST /webhook` (Telegram)
 - `POST /api/v1/chat/{thread_id}`
 - `POST /api/v1/chat/{thread_id}/resume`
 - `POST /api/v1/system/{thread_id}/notify`
-- `GET /chat` (web chat page)
+- `GET /chat`
 
-Example chat call:
+Example request:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/chat/demo-thread \
@@ -352,88 +408,31 @@ curl -X POST http://127.0.0.1:8000/api/v1/chat/demo-thread \
   -d '{"user_input":"Summarize the latest AI headlines"}'
 ```
 
-## Tool categories and plugins
-
-Tool plugins are loaded automatically from every Python module in `mcp_servers/` that exposes `TOOL_REGISTRY`.
-
-Category names are derived from file names:
-
-- `browser_tools.py` -> `browser`
-- `exec_tools.py` -> `exec`
-- `web_tools.py` -> `web`
-- `google_workspace.py` -> `google_workspace`
-- `core_tools.py` -> `core`
-
-To add a new tool family:
-
-1. Create `mcp_servers/<name>_tools.py`.
-2. Export `TOOL_REGISTRY = {"tool_name": callable, ...}`.
-3. Restart the app.
-4. (Optional) create/update a matching `skills/<skill>/skill.md` with `tools:` frontmatter.
-
-## Memory architecture
-
-- Conversation history and durable memory items are stored in SQLite.
-- Semantic retrieval uses Zvec + FastEmbed embeddings.
-- Skill embeddings are rebuilt at startup from `skills/`.
-
-Important persisted artifacts under `data/`:
-
-- `checkpoints_v2.db`: LangGraph checkpoint state.
-- `agent_session.db`: history + memory items.
-- `zvec_index/`: long-term memory vector index.
-- `zvec_skills/`: skill vector index.
-- `screenshots/`: browser tool screenshot output.
-- `browser_profile/`: persistent browser session/profile data.
-- `cron/jobs.json`: scheduler job definitions.
-- `cron/runs/*.jsonl`: per-job run history.
-
-## Docker deployment
-
-Build and run:
-
-```bash
-docker compose up --build
-```
-
-Notes:
-
-- App listens on port `8000`.
-- `./data` is mounted into the container for persistence.
-- Healthcheck uses `/health`.
-
 ## Testing
 
-Run all tests:
+Run tests:
 
 ```bash
-uv run pytest
+uv run pytest -q
 ```
 
-Run focused suites:
+Focused suites:
 
 ```bash
 uv run pytest tests/test_dynamic_worker_architecture.py -q
-uv run pytest tests/test_memory_system.py -q
+uv run pytest tests/test_observers.py -q
+uv run pytest tests/test_browser_tools.py -q
+uv run pytest tests/test_scheduler_runtime.py -q
 ```
 
-Browser tests require Playwright + browser runtime and may need network access.
+## What Makes EnterpriseClaw SOTA in Practice
 
-## Known limitations
+- Deterministic graph routing with explicit state contracts.
+- Replace-only environment anchors for stable long-horizon efficiency.
+- Hybrid durable + semantic memory retrieval.
+- JIT skill retrieval with strict tool scoping.
+- Multimodal browser grounding with AXTree-style text map + visual context.
+- Typed infrastructure failure handling and circuit-breaking.
+- Tiered HITL policy that balances safety and usability.
 
-- Web adapter in `interfaces/web_chat.py` is currently a scaffold (`send_message`/`request_approval` are placeholders), so Telegram and CLI are the most complete interfaces.
-- Startup onboarding gate currently expects both `GOOGLE_API_KEY` and `TELEGRAM_BOT_TOKEN` to be non-empty.
-- `skills/cron/skill.md` references cron tools (`cron_add`, `cron_list`, `cron_remove`) that are not currently provided in `mcp_servers/` in this repo snapshot.
-
-## Contribution guide
-
-When adding features:
-
-1. Keep tool schemas explicit and strict.
-2. Keep risky actions behind HITL checks.
-3. Add or update tests in `tests/`.
-4. Document new tools/skills in this README.
-
-## License
-
-MIT. See `LICENSE`.
+This repository is engineered for real, long-running agent workloads where reliability, controllability, and context efficiency matter more than demo-only benchmarks.

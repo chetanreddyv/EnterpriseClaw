@@ -389,8 +389,8 @@ async def lifespan(app: FastAPI):
     # ── Onboarding check ─────────────────────────────────────
     if settings.needs_onboarding:
         logger.warning("  ⚠️  EnterpriseClaw is not configured yet! Run the setup wizard:")
-        logger.warning("  uv run python onboarding.py")
-        logger.warning("  Or use CLI mode: uv run python onboarding.py --cli")
+        logger.warning("  make setup")
+        logger.warning("  Or use: uv run onboard")
         # Yield to keep FastAPI alive but don't initialize anything
         yield
         return
