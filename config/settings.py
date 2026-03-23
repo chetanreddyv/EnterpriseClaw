@@ -138,7 +138,18 @@ class Settings(BaseSettings):
         """Parse comma-separated chat IDs into a list of ints."""
         if not self.allowed_chat_ids:
             return []
-        return [int(cid.strip()) for cid in self.allowed_chat_ids.split(",") if cid.strip()]
+        ids = []
+        for cid in self.allowed_chat_ids.split(","):
+            # Strip whitespace and check for comments starting with '#'
+            clean_cid = cid.split("#")[0].strip()
+            if clean_cid:
+                try:
+                    ids.append(int(clean_cid))
+                except ValueError:
+                    # Ignore non-integer values gracefully (could be comments or typos)
+                    continue
+        return ids
+
 
     @property
     def whatsapp_allow_from_list(self) -> list[str]:
