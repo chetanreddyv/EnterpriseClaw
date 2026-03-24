@@ -69,7 +69,29 @@ async def _handle_commands(chat_id: str, text: str, platform: str) -> bool:
             if inspect.isawaitable(result):
                 result = await result
 
-        return str(result)
+    if cmd in ("/new", "/clear"):
+        try:
+            from memory.retrieval import memory_retrieval
+            from langchain_core.messages import RemoveMessage
+            
+            # 1. Clear relational DB history
+            await memory_retrieval.db.clear_history(str(chat_id))
+            
+            # 2. Clear graph state messages
+            config = {"configurable": {"thread_id": str(chat_id)}}
+            state = await graph.aget_state(config)
+            
+            messages_to_remove = [
+                RemoveMessage(id=m.id) for m in state.values.get("messages", []) if getattr(m, "id", None)
+            ]
+            if messages_to_remove:
+                await graph.aupdate_state(config, {"messages": messages_to_remove})
+                
+            await channel_manager.send_message(platform, chat_id, "🧹 Conversation history cleared. New chat started!")
+        except Exception as e:
+            logger.error(f"Failed to clear history: {e}", exc_info=True)
+            await channel_manager.send_message(platform, chat_id, f"❌ Failed to clear history: {e}")
+        return True
 
     if cmd == "/model" and len(parts) > 1:
         await graph.aupdate_state({"configurable": {"thread_id": chat_id}}, {"active_model": parts[1]})

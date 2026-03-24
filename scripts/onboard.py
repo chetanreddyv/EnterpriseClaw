@@ -7,14 +7,7 @@ import httpx
 import asyncio
 
 USE_RICH_PROMPTS = sys.stdin.isatty()
-
-try:
-    from rich.console import Console
-    from rich.panel import Panel
-    from rich.table import Table
-    from rich.text import Text
-    console = Console()
-except ImportError:
+  
     print("Please install requirements first!")
     print("Run: uv run --extra setup python scripts/onboard.py")
     sys.exit(1)

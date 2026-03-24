@@ -140,6 +140,14 @@ class DatabaseClient:
                 return list(reversed(rows))
         return await asyncio.to_thread(_fetch)
 
+    async def clear_history(self, thread_id: str):
+        """Clear the history for a given thread."""
+        async with self._lock:
+            def _clear():
+                with self.get_fast_connection() as conn:
+                    conn.execute("DELETE FROM thread_history WHERE thread_id = ?", (thread_id,))
+            await asyncio.to_thread(_clear)
+
     # ── Memory item methods ─────────────────────────────────────
 
     async def item_exists_by_text(self, text: str) -> Optional[str]:
