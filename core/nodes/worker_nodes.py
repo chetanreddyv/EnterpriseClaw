@@ -1052,6 +1052,14 @@ async def worker_summarize_node(state: WorkerState) -> Dict[str, Any]:
             "result_summary": existing_summary,
         }
 
+    step_count = state.get("step_count", 0)
+    max_steps = state.get("max_steps", settings.worker_max_steps)
+    if step_count >= max_steps:
+        return {
+            "status": "failed",
+            "result_summary": f"Worker reached maximum step limit ({max_steps}) without calling complete_task.",
+        }
+
     messages = state.get("messages", [])
 
     # Find the last AI response and extract its text (handles string and multimodal formats)

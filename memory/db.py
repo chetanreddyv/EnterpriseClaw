@@ -141,11 +141,16 @@ class DatabaseClient:
         return await asyncio.to_thread(_fetch)
 
     async def clear_history(self, thread_id: str):
-        """Clear the history for a given thread."""
+        """Archive the history for a given thread so it starts fresh but is saved."""
         async with self._lock:
             def _clear():
+                now_str = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+                archived_id = f"{thread_id}_archived_{now_str}"
                 with self.get_fast_connection() as conn:
-                    conn.execute("DELETE FROM thread_history WHERE thread_id = ?", (thread_id,))
+                    conn.execute(
+                        "UPDATE thread_history SET thread_id = ? WHERE thread_id = ?",
+                        (archived_id, thread_id)
+                    )
             await asyncio.to_thread(_clear)
 
     # ── Memory item methods ─────────────────────────────────────

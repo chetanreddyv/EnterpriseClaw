@@ -166,8 +166,8 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
         "- If the user asks to cancel one scheduled job and provides a job id, call `cancel_scheduled_task(job_id=...)`.",
         "- Delegate complex NON-SCHEDULING tasks via `delegate_task(objective='...')` with a focused objective.",
         "- Example: delegate_task(objective='Navigate LinkedIn, find the hiring manager, and email my resume summary').",
-        "- If Worker escalation occurs, do not re-delegate the same unchanged objective.",
-        "- Ask the user for clarification, constraints, or missing context after escalation.",
+        "- If Worker escalation or failure occurs, do not re-delegate the exact same objective.",
+        "- Ask the user for clarification, constraints, or adjust your strategy after escalation/failure.",
         "- Never invent tool names. Use only the exact supervisor tools listed above.",
         "- Never mention delegation mechanics to the user. Return only outcome-focused responses.",
     ]

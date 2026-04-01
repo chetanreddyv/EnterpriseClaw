@@ -130,6 +130,38 @@ class Settings(BaseSettings):
         default=200,
         description="Maximum run history records to keep per job.",
     )
+    scheduler_retry_enabled: bool = Field(
+        default=True,
+        description="Enable bounded retry scheduling for failed/interrupted cron runs.",
+    )
+    scheduler_delivery_enabled: bool = Field(
+        default=True,
+        description="Enable completion notifications for cron deliver modes reply/announce.",
+    )
+    scheduler_retry_max_retries: int = Field(
+        default=3,
+        description="Default maximum retry attempts for cron job failures.",
+    )
+    scheduler_retry_initial_backoff_seconds: int = Field(
+        default=60,
+        description="Initial retry backoff in seconds for cron failures.",
+    )
+    scheduler_retry_max_backoff_seconds: int = Field(
+        default=3600,
+        description="Maximum retry backoff in seconds for cron failures.",
+    )
+    scheduler_retry_jitter_ratio: float = Field(
+        default=0.2,
+        description="Random jitter ratio applied to retry delays to avoid retry storms.",
+    )
+    scheduler_shutdown_grace_seconds: int = Field(
+        default=30,
+        description="Grace period to await in-flight cron tasks during scheduler shutdown.",
+    )
+    allow_cron_skill_fallback: bool = Field(
+        default=False,
+        description="If True, explicit skill misses may fall back to semantic matching in cron mode.",
+    )
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

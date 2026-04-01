@@ -235,7 +235,7 @@ async def _handle_commands(chat_id: str, text: str, platform: str) -> bool:
         await channel_manager.send_message(
             platform,
             chat_id,
-            "Unknown `/cron` command. Use `/cron help`.",
+            "Unknown `/cron` command. Use `/cron help`. To create a task, send a normal message like: Schedule a background task to ...",
         )
         return True
 
@@ -464,7 +464,6 @@ async def lifespan(app: FastAPI):
         graph = build_supervisor_graph(checkpointer=checkpointer)
         logger.info("✅ Supervisor-Worker graph compiled with SQLite checkpointer")
 
-        # Initialize System Scheduler (Nanobot-style background task execution)
         from core.scheduler import initialize_scheduler, shutdown_scheduler
         await initialize_scheduler(checkpointer=checkpointer)
         logger.info("💓 System Scheduler initialized (manages background tasks and heartbeat)")

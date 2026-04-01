@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from typing import Any, Dict, List, Optional
 from langchain_core.tools import tool
@@ -280,7 +281,7 @@ async def batch_actions(actions: List[Dict[str, Any]], config: RunnableConfig = 
 
 
 # ═══════════════════════════════════════════════════════════════
-# Scheduler Tools (System-Level Scheduling / Nanobot Approach)
+# Scheduler Tools (System-Level Scheduling)
 # ═══════════════════════════════════════════════════════════════
 
 @tool
@@ -292,6 +293,10 @@ async def schedule_background_task(
     target: str = "isolated",
     timezone: str = None,
     skill_name: str = None,
+    retry_max_retries: int = None,
+    retry_initial_backoff_seconds: int = None,
+    retry_max_backoff_seconds: int = None,
+    config: RunnableConfig = None,
 ) -> str:
     """
     Schedule a background task to run on a specific schedule.
@@ -306,12 +311,15 @@ async def schedule_background_task(
             - For "cron": Standard cron expression (e.g., "0 9 * * 1-5" = 9am weekdays)
             - For "every": Milliseconds as string (e.g., "900000" = 15 minutes)
             - For "at": Unix timestamp in milliseconds or ISO 8601 timestamp
-        deliver_mode (str): "silent" (don't notify) or "announce" (send result to user)
+        deliver_mode (str): "silent", "reply", or "announce"
         target (str): "isolated" (run separately, default), "main" (run in user session), or "session:<id>"
         timezone (str): Timezone for cron expressions (e.g., "America/New_York")
         skill_name (str): Optional skill to activate explicitly (e.g., "job-finder", "browser-use").
             Use this when you know which skill the task needs. Bypasses semantic search for
             more reliable tool binding.
+        retry_max_retries (int): Optional per-job retry max attempts.
+        retry_initial_backoff_seconds (int): Optional per-job initial retry delay.
+        retry_max_backoff_seconds (int): Optional per-job max retry delay.
     
     Returns:
         str: Job ID if successful, error message otherwise
@@ -324,6 +332,10 @@ async def schedule_background_task(
         # Generate a descriptive job name
         name = f"Background Task: {objective[:50]}"
         
+        cfg = (config or {}).get("configurable", {}) if isinstance(config, dict) else {}
+        origin_thread_id = cfg.get("thread_id")
+        origin_platform = cfg.get("platform")
+
         job_id = scheduler.add_job(
             name=name,
             objective=objective,
@@ -333,6 +345,11 @@ async def schedule_background_task(
             target=target,
             tz=timezone,
             skill_name=skill_name,
+            channel=str(origin_thread_id) if origin_thread_id is not None else None,
+            platform=str(origin_platform) if origin_platform is not None else "system",
+            retry_max_retries=retry_max_retries,
+            retry_initial_backoff_seconds=retry_initial_backoff_seconds,
+            retry_max_backoff_seconds=retry_max_backoff_seconds,
         )
         
         return f"✅ Scheduled task (ID: {job_id}). Will execute on schedule: {schedule_type}={schedule_value}"
@@ -418,6 +435,20 @@ async def list_scheduled_tasks() -> str:
     except Exception as e:
         logger.error(f"list_scheduled_tasks failed: {e}")
         return f"❌ Failed to list tasks: {str(e)}"
+
+
+@tool
+async def get_scheduler_health() -> str:
+    """Return scheduler health snapshot (in-flight, due lag, retries)."""
+    try:
+        from core.scheduler import get_scheduler
+
+        scheduler = await get_scheduler()
+        health = scheduler.get_health_snapshot()
+        return "🩺 Scheduler Health\n" + json.dumps(health, indent=2, sort_keys=True)
+    except Exception as e:
+        logger.error(f"get_scheduler_health failed: {e}")
+        return f"❌ Failed to get scheduler health: {str(e)}"
 
 
 @tool
@@ -533,6 +564,7 @@ TOOL_REGISTRY = {
     "schedule_background_task": schedule_background_task,
     "send_user_notification": send_user_notification,
     "list_scheduled_tasks": list_scheduled_tasks,
+    "get_scheduler_health": get_scheduler_health,
     "cancel_scheduled_task": cancel_scheduled_task,
     "cancel_task": cancel_task,
     "cancel_all_scheduled_tasks": cancel_all_scheduled_tasks,

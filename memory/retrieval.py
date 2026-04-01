@@ -46,6 +46,10 @@ class MemoryRetrieval:
             await self.store.initialize_skills()
             self._initialized = True
 
+    def is_ready(self) -> bool:
+        """Return True when retrieval and skill index are initialized."""
+        return self._initialized
+
     # (process() method removed to replace background extraction with active tools)
 
     async def get_context(self, thread_id: str) -> str:
