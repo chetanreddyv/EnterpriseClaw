@@ -2,12 +2,19 @@ import os
 import sys
 import shutil
 import subprocess
+import secrets
 from pathlib import Path
 import httpx
 import asyncio
 
 USE_RICH_PROMPTS = sys.stdin.isatty()
   
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    console = Console()
+except ImportError:
     print("Please install requirements first!")
     print("Run: uv run --extra setup python scripts/onboard.py")
     sys.exit(1)
@@ -102,8 +109,12 @@ async def async_main():
     config = {}
     summary_status = {
         "GOOGLE_API_KEY": "⚠️ not set",
+        "OPENAI_API_KEY": "⚠️ not set",
+        "CLAUDE_API_KEY": "⚠️ not set",
         "TELEGRAM_BOT_TOKEN": "⚠️ not set",
-        "ALLOWED_CHAT_IDS": "⚠️ not set"
+        "TELEGRAM_SECRET_TOKEN": "⚠️ not set",
+        "ALLOWED_CHAT_IDS": "⚠️ not set",
+        "DEFAULT_MODEL": "✅ default (openai/gpt-5.4-mini)"
     }
 
     # Copy .env.example if .env doesn't exist
@@ -119,7 +130,7 @@ async def async_main():
 
     google_key = existing_env.get("GOOGLE_API_KEY", "")
     if not google_key:
-        console.print("[bold]── Step 1/3: Google API Key ─────────────────────────[/bold]")
+        console.print("[bold]── Google API Key ──────────────────────────[/bold]")
         console.print("[dim]Get your API Key at: https://aistudio.google.com/apikey[/dim]\n")
         while True:
             key = await prompt_for_input("Paste your Google API Key (or press enter to skip):", is_password=True)
@@ -141,9 +152,56 @@ async def async_main():
         config["GOOGLE_API_KEY"] = google_key
         summary_status["GOOGLE_API_KEY"] = "✅ set (existing)"
 
+    openai_key = existing_env.get("OPENAI_API_KEY", "")
+    if not openai_key:
+        console.print("[bold]── OpenAI API Key ──────────────────────────[/bold]")
+        console.print("[dim]Required if you plan to use OpenAI models instead of Gemini[/dim]\n")
+        key = await prompt_for_input("Paste your OpenAI API Key (or press enter to skip):", is_password=True)
+        if key:
+            config["OPENAI_API_KEY"] = key
+            summary_status["OPENAI_API_KEY"] = "✅ set (new)"
+            console.print("  [green]OpenAI API Key saved ✅[/green]\n")
+        else:
+            console.print("[yellow]Skipping OpenAI API key.[/yellow]\n")
+    else:
+        config["OPENAI_API_KEY"] = openai_key
+        summary_status["OPENAI_API_KEY"] = "✅ set (existing)"
+
+    claude_key = existing_env.get("CLAUDE_API_KEY", "")
+    if not claude_key:
+        console.print("[bold]── Claude API Key ──────────────────────────[/bold]")
+        console.print("[dim]Required if you plan to use Anthropic Claude models[/dim]\n")
+        key = await prompt_for_input("Paste your Claude API Key (or press enter to skip):", is_password=True)
+        if key:
+            config["CLAUDE_API_KEY"] = key
+            summary_status["CLAUDE_API_KEY"] = "✅ set (new)"
+            console.print("  [green]Claude API Key saved ✅[/green]\n")
+        else:
+            console.print("[yellow]Skipping Claude API key.[/yellow]\n")
+    else:
+        config["CLAUDE_API_KEY"] = claude_key
+        summary_status["CLAUDE_API_KEY"] = "✅ set (existing)"
+
+    # Default Model
+    default_model = existing_env.get("DEFAULT_MODEL", "")
+    if not default_model:
+        console.print("[bold]── Default Model ───────────────────────────[/bold]")
+        console.print("[dim]Select your preferred default model (e.g. 'openai/gpt-5.4-mini', 'google/gemini-2.5-flash')[/dim]\n")
+        val = await prompt_for_input("Enter default model (or press enter for openai/gpt-5.4-mini):")
+        if val:
+            config["DEFAULT_MODEL"] = val
+            summary_status["DEFAULT_MODEL"] = f"✅ set ({val})"
+        else:
+            config["DEFAULT_MODEL"] = "openai/gpt-5.4-mini"
+            summary_status["DEFAULT_MODEL"] = "✅ default (openai/gpt-5.4-mini)"
+        console.print(f"  [green]Set to: {config['DEFAULT_MODEL']} ✅[/green]\n")
+    else:
+        config["DEFAULT_MODEL"] = default_model
+        summary_status["DEFAULT_MODEL"] = f"✅ set ({default_model})"
+
     telegram_token = existing_env.get("TELEGRAM_BOT_TOKEN", "")
     if not telegram_token:
-        console.print("[bold]── Step 2/3: Telegram Bot Token ─────────────────────[/bold]")
+        console.print("[bold]── Telegram Bot Token ──────────────────────[/bold]")
         console.print("[dim]Create a bot via https://t.me/BotFather -> /newbot[/dim]\n")
         while True:
             token = await prompt_for_input("Paste your Bot Token (or press enter to skip):", is_password=True)
@@ -165,9 +223,20 @@ async def async_main():
         config["TELEGRAM_BOT_TOKEN"] = telegram_token
         summary_status["TELEGRAM_BOT_TOKEN"] = "✅ set (existing)"
 
+    telegram_secret = existing_env.get("TELEGRAM_SECRET_TOKEN", "")
+    if not telegram_secret:
+        # Auto-generate if not present
+        secret = secrets.token_urlsafe(32)
+        config["TELEGRAM_SECRET_TOKEN"] = secret
+        summary_status["TELEGRAM_SECRET_TOKEN"] = "✅ auto-generated"
+        console.print("[dim]✅ Auto-generated TELEGRAM_SECRET_TOKEN for webhook security[/dim]\n")
+    else:
+        config["TELEGRAM_SECRET_TOKEN"] = telegram_secret
+        summary_status["TELEGRAM_SECRET_TOKEN"] = "✅ set (existing)"
+
     allowed_chats = existing_env.get("ALLOWED_CHAT_IDS", "")
     if not allowed_chats:
-        console.print("[bold]── Step 3/3: Telegram Chat IDs ───────────────────────[/bold]")
+        console.print("[bold]── Telegram Chat IDs ───────────────────────[/bold]")
         console.print("[dim]Message @userinfobot on Telegram to get your numeric Chat ID.[/dim]\n")
         while True:
             ids = await prompt_for_input("Enter your Chat ID(s) comma-separated (or press enter to skip):")
