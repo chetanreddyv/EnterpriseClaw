@@ -34,6 +34,7 @@ dependencies = [
     "langchain>=0.3.0",
     "langchain-google-genai>=4.2.1",
     "langchain-core>=1.2.14",
+    "langchain-mcp-adapters>=0.2.0",
     "playwright>=1.50.0",
 
     "browser-use>=0.11.13",

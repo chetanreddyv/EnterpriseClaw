@@ -442,6 +442,12 @@ async def lifespan(app: FastAPI):
     channel_manager.register_client("web", web_client)
     logger.info("✅ Web client registered")
 
+    # Initialize external MCP tools (if configured)
+    from mcp_servers.external_mcp import initialize_external_mcp_tools, shutdown_external_mcp
+    mcp_tool_count = await initialize_external_mcp_tools()
+    if mcp_tool_count > 0:
+        logger.info(f"✅ Loaded {mcp_tool_count} external MCP tools")
+
     # Initialize MemoryRetrieval
     try:
         from memory.retrieval import memory_retrieval
@@ -496,6 +502,11 @@ async def lifespan(app: FastAPI):
         await shutdown_scheduler()
         logger.info("✅ System Scheduler shut down")
         await telegram_client.close()
+        
+        from mcp_servers.external_mcp import shutdown_external_mcp
+        await shutdown_external_mcp()
+        logger.info("✅ External MCP connections closed")
+        
         try:
             from core.browser_session import BrowserSessionManager
             await BrowserSessionManager.shutdown()

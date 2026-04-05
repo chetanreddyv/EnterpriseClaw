@@ -284,6 +284,52 @@ async def async_main():
     with console.status("[bold cyan]📦 Installing Playwright browsers..."):
         run_playwright_install()
 
+    # ── MCP Tools Setup ──────────────────────────────────────
+    console.print("\n[bold]── MCP Tools (Optional) ──────────────────────────────[/bold]")
+    console.print(
+        "[dim]MCP (Model Context Protocol) lets EnterpriseClaw use external tool servers,\n"
+        "e.g. Anthropic's official fetch, filesystem, databases, and more.[/dim]\n"
+    )
+    mcp_config_path = PROJECT_ROOT / "mcp_config.json"
+    example_mcp_path = PROJECT_ROOT / ".example.mcp_config.json"
+
+    if mcp_config_path.exists():
+        console.print("[dim green]✅ mcp_config.json already exists — skipping.[/dim green]\n")
+    else:
+        if USE_RICH_PROMPTS:
+            want_mcp = await questionary.confirm(
+                "Would you like to set up MCP tool servers now?", default=False
+            ).ask_async()
+        else:
+            raw = input("Would you like to set up MCP tool servers now? [y/N] ").strip().lower()
+            want_mcp = raw in {"y", "yes"}
+
+        if want_mcp:
+            if example_mcp_path.exists():
+                shutil.copy(example_mcp_path, mcp_config_path)
+                console.print(f"[green]✅ Created mcp_config.json from template.[/green]")
+            else:
+                mcp_config_path.write_text(
+                    '{\n  "mcpServers": {}\n}\n', encoding="utf-8"
+                )
+                console.print("[green]✅ Created empty mcp_config.json.[/green]")
+
+            console.print(Panel(
+                "[bold]To add MCP servers, edit [cyan]mcp_config.json[/cyan] in the project root.[/bold]\n\n"
+                "Example — add the official Anthropic fetch server (requires [cyan]uvx[/cyan]):\n"
+                '[dim]  "fetch": { "transport": "stdio", "command": "uvx", "args": ["mcp-server-fetch"] }[/dim]\n\n'
+                "Popular servers:\n"
+                "  • [cyan]uvx mcp-server-fetch[/cyan]     — HTTP fetch tool\n"
+                "  • [cyan]uvx mcp-server-filesystem[/cyan] — Local file access\n"
+                "  • [cyan]uvx mcp-server-git[/cyan]        — Git operations\n\n"
+                "Browse more at: [link=https://github.com/modelcontextprotocol/servers]github.com/modelcontextprotocol/servers[/link]\n\n"
+                "[yellow]⚠️ mcp_config.json is gitignored — it is safe to store tokens in it.[/yellow]",
+                title="MCP Server Setup",
+                border_style="cyan",
+            ))
+        else:
+            console.print("[yellow]Skipping MCP setup. You can add mcp_config.json later.[/yellow]\n")
+
     # Dry-run check for application config
     console.print("\n[bold]── Dry Run Validation ────────────────────────────────[/bold]")
     with console.status("[bold blue]Testing configuration validity..."):

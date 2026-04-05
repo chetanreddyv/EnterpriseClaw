@@ -61,6 +61,12 @@ class Settings(BaseSettings):
         description="Global toggle for HITL approval gates. When False, all tools are auto-approved.",
     )
 
+    # ── MCP Tools ────────────────────────────────────────────
+    mcp_config_path: str = Field(
+        default="./mcp_config.json",
+        description="Path to MCP server configuration file (Claude Desktop JSON format).",
+    )
+
     # ── Browser Observations & Hardening ──────────────────────
     enable_multimodal_observation: bool = Field(
         default=True,
