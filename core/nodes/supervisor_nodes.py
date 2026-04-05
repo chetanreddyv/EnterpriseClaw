@@ -22,6 +22,7 @@ from langchain_core.runnables import RunnableConfig
 
 from core.graphs.states import SupervisorState
 from core.llm import init_agent_llm, is_llm_connection_error
+from core.tool_manifest import build_capability_manifest
 from mcp_servers import GLOBAL_TOOL_REGISTRY
 from config.settings import settings
 
@@ -146,17 +147,16 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
         "## Core Capabilities\n"
         "- Use `save_to_long_term_memory` to persist durable user facts and preferences.\n"
         "- Use the System Clock section above for time-sensitive decisions.\n"
-        "- Use `web_search` and `web_fetch` for factual lookups.\n"
         "- Use `schedule_background_task` for all background task scheduling.\n"
         f"- Exact supervisor tools: {', '.join(sorted(SUPERVISOR_TOOLS))}.\n"
         "- Use `delegate_task(objective=...)` for complex multi-step execution. "
-        "The Worker will select tools dynamically from matched skills.\n"
-        "- **Worker capabilities available via delegation:** `exec_command` (terminal/shell), "
-        "browser actions (navigate, click, type), and file operations. "
-        "When the user asks you to run a command, execute code, write a file, or perform browser "
-        "actions, delegate to the Worker — do NOT tell the user you cannot do it."
+        "The Worker will select tools dynamically from matched skills."
     )
     prompt_parts.append(capabilities_prompt)
+
+    # Section 5: Worker Capabilities
+    worker_manifest = build_capability_manifest()
+    prompt_parts.append(worker_manifest)
 
     # Section 5: Rules
     rules_lines = [
@@ -170,8 +170,9 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
         "- If the user asks to cancel one scheduled job and provides a job id, call `cancel_scheduled_task(job_id=...)`.",
         "- Delegate complex NON-SCHEDULING tasks via `delegate_task(objective='...')` with a focused objective.",
         "- Example: delegate_task(objective='Navigate LinkedIn, find the hiring manager, and email my resume summary').",
-        "- CRITICAL: If the user mentions `exec_command`, running a shell command, writing a file, or any terminal operation, "
-        "you MUST delegate to the Worker. The Worker has `exec_command` available. Never tell the user you cannot run commands.",
+        "- CRITICAL: If the user's request matches ANY capability listed in 'Worker Capabilities' above, "
+        "you MUST delegate to the Worker via `delegate_task`. NEVER tell the user you cannot do something "
+        "that appears in the Worker Capabilities list.",
         "- If Worker escalation or failure occurs, do not re-delegate the exact same objective.",
         "- Ask the user for clarification, constraints, or adjust your strategy after escalation/failure.",
         "- Never invent tool names. Use only the exact supervisor tools listed above for YOUR direct actions.",

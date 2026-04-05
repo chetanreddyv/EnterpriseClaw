@@ -1,0 +1,22 @@
+
+--- TCM OUTPUT ---
+## Worker Capabilities (Available via Delegation)
+The following capabilities are available to the Worker agent.
+Delegate tasks matching these descriptions using `delegate_task(objective='...')`.
+
+- **exec_command** (core): Execute shell commands in the local terminal.
+- **browser_use**: Control a real web browser to navigate, interact with, and extract data from websites.
+  Tools: browser_navigate, browser_click, browser_type, browser_screenshot, browser_get_text, browser_execute_js, browser_go_back, browser_scroll, browser_wait_for, browser_snapshot, browser_close_current_tab, browser_select_option, browser_press_key, browser_hover, browser_handle_dialog, browser_file_upload
+- **exec_tools**: Operational guidelines for shell command execution. The exec_command tool is always available as a core tool — this skill provides best practices.
+  Tools: []
+- **job_application**: Automates end-to-end job searching and application submission on job boards. Requires explicit user permission to submit applications.
+  Tools: browser_navigate, browser_click, browser_type, browser_screenshot, browser_get_text, browser_snapshot, browser_go_back, browser_scroll, browser_wait_for, browser_close_current_tab, browser_select_option, browser_press_key, browser_handle_dialog, browser_file_upload
+- **job_finder_cron**: Activate this skill when the user asks to find jobs, search for roles,
+  Tools: browser_navigate, browser_snapshot, browser_click, browser_type, browser_get_text, browser_screenshot, browser_scroll, web_search, web_fetch, exec_command, batch_actions, save_to_long_term_memory
+- **job-outreach**: Research target companies and contacts, generate hyper-personalized cold outreach
+  Tools: web_search, web_fetch, exec_command, save_to_long_term_memory
+- **user_profile**: User's personal information, resume, and professional profile for job application filling and personalization.
+- **web_tools**: Search the web for up-to-date information, news, and fetch web page contents.
+  Tools: web_search, web_fetch
+------------------
+

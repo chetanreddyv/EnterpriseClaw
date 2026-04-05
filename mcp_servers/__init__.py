@@ -72,3 +72,13 @@ def load_plugins():
                 logger.error(f"❌ Failed to load plugin {module_name}: {e}")
 
 load_plugins()
+
+def get_mcp_tool_summaries() -> list[dict]:
+    """Return name and description for all MCP-category tools."""
+    summaries = []
+    for name, metadata in GLOBAL_TOOL_METADATA.items():
+        if metadata.get("category") == "mcp":
+            func = GLOBAL_TOOL_REGISTRY.get(name)
+            desc = getattr(func, "description", "") if func else ""
+            summaries.append({"name": name, "description": desc})
+    return summaries
