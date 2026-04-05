@@ -93,6 +93,18 @@ async def _handle_commands(chat_id: str, text: str, platform: str) -> bool:
             await channel_manager.send_message(platform, chat_id, f"❌ Failed to clear history: {e}")
         return True
 
+    if cmd in ("/kill", "/stop", "/shutdown"):
+        await channel_manager.send_message(platform, chat_id, "🛑 **Emergency Shutdown Activated**. Instance is terminating...")
+        logger.warning(f"🛑 Emergency shutdown requested via {platform} (Thread: {chat_id})")
+        import os
+        import signal
+        import asyncio
+        async def kill_proc():
+            await asyncio.sleep(1)
+            os.kill(os.getpid(), signal.SIGTERM)
+        asyncio.create_task(kill_proc())
+        return True
+
     if cmd == "/model" and len(parts) > 1:
         await graph.aupdate_state({"configurable": {"thread_id": chat_id}}, {"active_model": parts[1]})
         await channel_manager.send_message(platform, chat_id, f"🔄 Brain swapped! Now using: `{parts[1]}`")
