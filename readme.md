@@ -25,6 +25,110 @@ Most agent stacks fail in one of these ways:
 
 EnterpriseClaw addresses these directly with deterministic graph routing, replace-only environment anchors, strict tool policy, and typed failure handling.
 
+## Setup
+
+### 1. Prerequisites
+
+- Python 3.12+
+- `uv`
+- Chromium (for browser tools)
+
+### 2. Install
+
+```bash
+git clone https://github.com/chetanreddyv/EnterpriseClaw.git
+cd EnterpriseClaw
+uv sync
+uv run playwright install chromium
+```
+
+### 3. Configure environment
+
+Guided wizard (sets up API keys and browsers automatically):
+
+```bash
+make setup
+```
+
+Or without Make:
+
+```bash
+uv run onboard
+```
+
+Manual baseline:
+
+```bash
+cp .env.example .env
+```
+
+Common required keys:
+
+- `GOOGLE_API_KEY`
+- `TELEGRAM_BOT_TOKEN`
+
+Common optional keys:
+
+- `OPENAI_API_KEY`
+- `LM_STUDIO_BASE_URL`
+- `LM_STUDIO_API_KEY`
+- `GOOGLE_TOKEN_JSON`
+- `WHATSAPP_ENABLED`
+- `WHATSAPP_BRIDGE_URL`
+- `WHATSAPP_BRIDGE_TOKEN`
+- `ALLOWED_CHAT_IDS`
+- `TELEGRAM_SECRET_TOKEN`
+
+### 4. Run
+
+API:
+
+```bash
+uv run python app.py
+```
+
+CLI:
+
+```bash
+uv run python app.py --cli
+```
+
+Health check:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+## Chat Commands
+
+Thread-scoped runtime commands:
+
+- `/models`: list configured providers.
+- `/model <provider/model>`: switch active model for current thread.
+- `/tools`: inspect tool policy.
+- `/permit <tool_name>`: allow tool.
+- `/deny <tool_name>`: deny tool.
+- `/cron`, `/cron list`, `/cron cancel <job_id>`, `/cron cancel all`: manage jobs.
+
+## API Surface
+
+Main endpoints in `app.py`:
+
+- `GET /health`
+- `POST /webhook` (Telegram)
+- `POST /api/v1/chat/{thread_id}`
+- `POST /api/v1/chat/{thread_id}/resume`
+- `POST /api/v1/system/{thread_id}/notify`
+- `GET /chat`
+
+Example request:
+
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"user_input":"Summarize the latest AI headlines"}'
+```
+
 ## Core Architecture
 
 ### 1. Supervisor (persistent orchestrator)
@@ -272,6 +376,38 @@ Tools are loaded dynamically from `mcp_servers/`.
 
 This keeps tool surface extensible while preserving deterministic runtime categorization.
 
+## External MCP Servers (Model Context Protocol)
+
+EnterpriseClaw natively supports the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) via `langchain-mcp-adapters`. You can seamlessly attach external tool servers (e.g., Anthropic's official fetch, local filesystems, databases, or Git) without writing new code.
+
+### Setting up an MCP Server
+
+1. Create an `mcp_config.json` in the root directory (or copy `.example.mcp_config.json`).
+2. Define your servers using the Claude Desktop JSON format.
+
+Example using Anthropic's official `fetch` server:
+
+```json
+{
+  "mcpServers": {
+    "fetch": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    }
+  }
+}
+```
+
+3. Restart the app. The MCP tools are auto-discovered, injected into the global tool registry, and will appear when you use the `/tools` command.
+
+### Managing MCP Tools
+
+By default, external MCP tools are mapped as `mcp` category tools and are 🔒 **locked behind Human-In-The-Loop (HITL) approval** for safety.
+
+- **Check loaded tools:** Send `/tools` in chat to see all tools and their current permission tier.
+- **Allow a tool to run autonomously:** Send `/permit <tool_name>` (e.g., `/permit fetch`) in the thread.
+
 ## Interfaces
 
 EnterpriseClaw supports multiple front doors:
@@ -298,132 +434,6 @@ The FastAPI app and graph lifecycle are managed in `app.py`.
 - `skills/`: skill packs used for JIT binding.
 - `tests/`: architecture, tools, memory, scheduler, and integration tests.
 
-## Setup
-
-### 1. Prerequisites
-
-- Python 3.12+
-- `uv`
-- Chromium (for browser tools)
-
-### 2. Install
-
-```bash
-git clone https://github.com/chetanreddyv/EnterpriseClaw.git
-cd EnterpriseClaw
-uv sync
-uv run playwright install chromium
-```
-
-### 3. Configure environment
-
-Guided wizard (sets up API keys and browsers automatically):
-
-```bash
-make setup
-```
-
-Or without Make:
-
-```bash
-uv run onboard
-```
-
-Manual baseline:
-
-```bash
-cp .env.example .env
-```
-
-Common required keys:
-
-- `GOOGLE_API_KEY`
-- `TELEGRAM_BOT_TOKEN`
-
-Common optional keys:
-
-- `OPENAI_API_KEY`
-- `LM_STUDIO_BASE_URL`
-- `LM_STUDIO_API_KEY`
-- `GOOGLE_TOKEN_JSON`
-- `WHATSAPP_ENABLED`
-- `WHATSAPP_BRIDGE_URL`
-- `WHATSAPP_BRIDGE_TOKEN`
-- `ALLOWED_CHAT_IDS`
-- `TELEGRAM_SECRET_TOKEN`
-
-### 4. Optional Google Workspace auth
-
-```bash
-uv run python scripts/google_auth_helper.py
-```
-
-### 5. Run
-
-API:
-
-```bash
-uv run python app.py
-```
-
-CLI:
-
-```bash
-uv run python app.py --cli
-```
-
-Health check:
-
-```bash
-curl http://127.0.0.1:8000/health
-```
-
-## Chat Commands
-
-Thread-scoped runtime commands:
-
-- `/models`: list configured providers.
-- `/model <provider/model>`: switch active model for current thread.
-- `/tools`: inspect tool policy.
-- `/permit <tool_name>`: allow tool.
-- `/deny <tool_name>`: deny tool.
-- `/cron`, `/cron list`, `/cron cancel <job_id>`, `/cron cancel all`: manage jobs.
-
-## API Surface
-
-Main endpoints in `app.py`:
-
-- `GET /health`
-- `POST /webhook` (Telegram)
-- `POST /api/v1/chat/{thread_id}`
-- `POST /api/v1/chat/{thread_id}/resume`
-- `POST /api/v1/system/{thread_id}/notify`
-- `GET /chat`
-
-Example request:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/v1/chat/demo-thread \
-  -H "Content-Type: application/json" \
-  -d '{"user_input":"Summarize the latest AI headlines"}'
-```
-
-## Testing
-
-Run tests:
-
-```bash
-uv run pytest -q
-```
-
-Focused suites:
-
-```bash
-uv run pytest tests/test_dynamic_worker_architecture.py -q
-uv run pytest tests/test_observers.py -q
-uv run pytest tests/test_browser_tools.py -q
-uv run pytest tests/test_scheduler_runtime.py -q
-```
 
 ## What Makes EnterpriseClaw SOTA in Practice
 
