@@ -1115,6 +1115,88 @@ async def system_notify_endpoint(thread_id: str, request: Request):
 
 
 # ==========================================================
+# 7. Settings API (Web UI Config Panel)
+# ==========================================================
+
+MUTABLE_SETTINGS = {
+    "hitl_enabled": bool,
+    "default_model": str,
+    "worker_max_steps": int,
+    "worker_max_observation_chars": int,
+    "worker_max_skill_prompt_chars": int,
+    "supervisor_token_budget": int,
+    "supervisor_content_truncation": int,
+    "scheduler_max_concurrent_jobs": int,
+    "scheduler_heartbeat_seconds": int,
+    "scheduler_run_history_max": int,
+}
+
+
+@app.get("/api/v1/settings")
+async def get_settings():
+    """Return current values for all mutable settings."""
+    return {
+        "settings": {
+            key: getattr(settings, key) for key in MUTABLE_SETTINGS
+        }
+    }
+
+
+@app.put("/api/v1/settings")
+async def update_setting(request: Request):
+    """Update a single setting by key. Validates type and range."""
+    body = await request.json()
+    key = body.get("key", "").strip().lower()
+    raw_value = body.get("value", "")
+
+    if key not in MUTABLE_SETTINGS:
+        return JSONResponse(
+            {"error": f"Unknown setting: {key}"}, status_code=400
+        )
+
+    expected_type = MUTABLE_SETTINGS[key]
+    try:
+        if expected_type is bool:
+            if str(raw_value).lower() in {"true", "1", "yes", "on"}:
+                coerced = True
+            elif str(raw_value).lower() in {"false", "0", "no", "off"}:
+                coerced = False
+            else:
+                raise ValueError(f"Expected true/false, got '{raw_value}'")
+        elif expected_type is int:
+            coerced = int(raw_value)
+            if coerced < 0:
+                raise ValueError("Value must be a non-negative integer")
+        else:
+            coerced = str(raw_value)
+
+        object.__setattr__(settings, key, coerced)
+        logger.info(f"⚙️ Setting updated via Web UI: {key} → {coerced}")
+        return {"key": key, "value": coerced}
+
+    except ValueError as e:
+        return JSONResponse(
+            {"error": f"Invalid value for {key}: {e}"}, status_code=400
+        )
+
+
+@app.post("/api/v1/settings/reset")
+async def reset_settings():
+    """Reload all settings from .env file."""
+    try:
+        from config.settings import Settings
+        new_settings = Settings()
+        for field_name in new_settings.model_fields:
+            object.__setattr__(settings, field_name, getattr(new_settings, field_name))
+        logger.info("⚙️ Settings reloaded from .env via Web UI")
+        return {"status": "reloaded"}
+    except Exception as e:
+        return JSONResponse(
+            {"error": f"Failed to reload settings: {e}"}, status_code=500
+        )
+
+
+# ==========================================================
 # 8. Entrypoint
 # ==========================================================
 

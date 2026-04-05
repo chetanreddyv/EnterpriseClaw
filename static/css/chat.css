@@ -230,3 +230,166 @@
     border-radius: 0 8px 8px 0;
     padding: 1rem;
 }
+
+/* ═══════════════════════════════════════════════════════════
+   Settings Panel
+   ═══════════════════════════════════════════════════════════ */
+
+#settingsBody {
+    max-width: 768px;
+    margin-left: auto;
+    margin-right: auto;
+    width: 100%;
+}
+
+/* Category Cards */
+.settings-category {
+    background: rgba(252, 249, 243, 0.55);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(208, 197, 178, 0.25);
+    border-radius: 16px;
+    padding: 24px;
+    margin-bottom: 16px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.3s, box-shadow 0.3s;
+}
+
+.settings-category::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(201, 168, 76, 0.25), transparent 60%);
+}
+
+.settings-category:hover {
+    border-color: rgba(201, 168, 76, 0.2);
+    box-shadow: 0 8px 30px rgba(77, 70, 55, 0.04);
+}
+
+/* Setting Rows */
+.setting-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 16px;
+    border-radius: 12px;
+    transition: background 0.2s;
+}
+
+.setting-row:hover {
+    background: rgba(201, 168, 76, 0.04);
+}
+
+/* Toggle Switch */
+.setting-toggle {
+    flex-shrink: 0;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+}
+
+.setting-toggle input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.toggle-track {
+    position: relative;
+    display: inline-block;
+    width: 48px;
+    height: 28px;
+    border-radius: 14px;
+    background: rgba(208, 197, 178, 0.5);
+    border: 1.5px solid rgba(126, 118, 101, 0.2);
+    transition: background 0.3s, border-color 0.3s;
+}
+
+.toggle-thumb {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.setting-toggle input:checked ~ .toggle-track {
+    background: linear-gradient(135deg, #a08030, #c9a84c);
+    border-color: transparent;
+}
+
+.setting-toggle input:checked ~ .toggle-track .toggle-thumb {
+    transform: translateX(20px);
+}
+
+.setting-toggle input:focus-visible ~ .toggle-track {
+    outline: 2px solid rgba(117, 91, 0, 0.3);
+    outline-offset: 2px;
+}
+
+/* Number / Text Inputs */
+.setting-input {
+    flex-shrink: 0;
+    width: 100px;
+    padding: 8px 12px;
+    border-radius: 10px;
+    border: 1.5px solid rgba(208, 197, 178, 0.35);
+    background: rgba(255, 255, 255, 0.7);
+    font-family: 'Manrope', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    color: #1c1c18;
+    text-align: right;
+    outline: none;
+    transition: border-color 0.25s, box-shadow 0.25s, background 0.25s;
+    -moz-appearance: textfield;
+    appearance: textfield;
+}
+
+.setting-input::-webkit-outer-spin-button,
+.setting-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.setting-input:focus {
+    border-color: rgba(201, 168, 76, 0.5);
+    box-shadow: 0 0 0 3px rgba(201, 168, 76, 0.08);
+    background: #fff;
+}
+
+.setting-input:hover {
+    border-color: rgba(201, 168, 76, 0.3);
+}
+
+.setting-input-text {
+    width: 220px;
+    text-align: left;
+    font-weight: 500;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px;
+}
+
+@media (max-width: 640px) {
+    .setting-row {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+    }
+    .setting-input, .setting-input-text {
+        width: 100%;
+        text-align: left;
+    }
+    .setting-toggle {
+        align-self: flex-end;
+    }
+}
+
