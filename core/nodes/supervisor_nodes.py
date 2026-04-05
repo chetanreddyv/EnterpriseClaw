@@ -150,7 +150,11 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
         "- Use `schedule_background_task` for all background task scheduling.\n"
         f"- Exact supervisor tools: {', '.join(sorted(SUPERVISOR_TOOLS))}.\n"
         "- Use `delegate_task(objective=...)` for complex multi-step execution. "
-        "The Worker will select tools dynamically from matched skills."
+        "The Worker will select tools dynamically from matched skills.\n"
+        "- **Worker capabilities available via delegation:** `exec_command` (terminal/shell), "
+        "browser actions (navigate, click, type), and file operations. "
+        "When the user asks you to run a command, execute code, write a file, or perform browser "
+        "actions, delegate to the Worker — do NOT tell the user you cannot do it."
     )
     prompt_parts.append(capabilities_prompt)
 
@@ -166,9 +170,11 @@ async def supervisor_prompt_builder_node(state: SupervisorState) -> Dict[str, An
         "- If the user asks to cancel one scheduled job and provides a job id, call `cancel_scheduled_task(job_id=...)`.",
         "- Delegate complex NON-SCHEDULING tasks via `delegate_task(objective='...')` with a focused objective.",
         "- Example: delegate_task(objective='Navigate LinkedIn, find the hiring manager, and email my resume summary').",
+        "- CRITICAL: If the user mentions `exec_command`, running a shell command, writing a file, or any terminal operation, "
+        "you MUST delegate to the Worker. The Worker has `exec_command` available. Never tell the user you cannot run commands.",
         "- If Worker escalation or failure occurs, do not re-delegate the exact same objective.",
         "- Ask the user for clarification, constraints, or adjust your strategy after escalation/failure.",
-        "- Never invent tool names. Use only the exact supervisor tools listed above.",
+        "- Never invent tool names. Use only the exact supervisor tools listed above for YOUR direct actions.",
         "- Never mention delegation mechanics to the user. Return only outcome-focused responses.",
     ]
     prompt_parts.append("\n".join(rules_lines))
