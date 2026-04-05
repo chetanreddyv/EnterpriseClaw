@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+import signal
+import sys
 from datetime import datetime, timezone
 from typing import Dict
 from pydantic import Field
@@ -73,10 +75,11 @@ async def _monitor_background_process(process, command: str, thread_id: str, pla
 
     # Inject via Universal Gateway
     if thread_id:
+        base_url = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
         try:
             async with httpx.AsyncClient() as client:
                 await client.post(
-                    f"http://localhost:8000/api/v1/system/{thread_id}/notify",
+                    f"{base_url}/api/v1/system/{thread_id}/notify",
                     json={
                         "message": msg,
                         "platform": platform
@@ -90,7 +93,8 @@ async def _monitor_background_process(process, command: str, thread_id: str, pla
 async def exec_command(
     command: str = Field(
         ..., 
-        description="The exact shell command to run. DO NOT use interactive commands (like vim, nano, or top)."
+        description="The exact shell command to run. DO NOT use interactive commands (like vim, nano, or top). "
+                    "Note: 'cd' commands do not persist between steps. Use the 'work_dir' parameter instead or chain commands (e.g., 'cd foo && ls')."
     ),
     timeout_seconds: int = Field(
         ..., 
@@ -99,6 +103,10 @@ async def exec_command(
     background: bool = Field(
         ..., 
         description="Set to True to run asynchronously in the background, otherwise False."
+    ),
+    work_dir: str = Field(
+        None,
+        description="Optional absolute or relative path to execute the command in. Defaults to the current active directory."
     ),
     config: RunnableConfig = None
 ) -> str:
@@ -109,17 +117,25 @@ async def exec_command(
     
     thread_id = get_thread_id(config, default="default")
     platform = config.get("configurable", {}).get("platform", "telegram") if config else "telegram"
-    cwd = os.getcwd()
+    cwd = os.path.abspath(work_dir) if work_dir else os.getcwd()
+    
+    if not os.path.exists(cwd):
+        return f"Action failed: The specified working directory '{cwd}' does not exist."
+
+    # Prepare kwargs for process creation, including process group tracking for POSIX
+    proc_kwargs = {
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+        "cwd": cwd
+    }
+    if os.name == "posix":
+        proc_kwargs["preexec_fn"] = os.setsid
     
     # --- FIRE AND FORGET MODE (NOW WITH MONITORING) ---
     if background:
         try:
             _update_exec_state(thread_id, command, cwd, "running", "Background process started.")
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
+            process = await asyncio.create_subprocess_shell(command, **proc_kwargs)
             asyncio.create_task(_monitor_background_process(process, command, thread_id, platform, cwd))
             return f"Action successful: started background command (pid={process.pid})."
         except Exception as e:
@@ -129,11 +145,7 @@ async def exec_command(
     # --- BLOCKING MODE (WITH STRICT TIMEOUTS) ---
     try:
         _update_exec_state(thread_id, command, cwd, "running", "")
-        process = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
+        process = await asyncio.create_subprocess_shell(command, **proc_kwargs)
         
         # We wrap the communication in wait_for to prevent infinite hangs
         stdout, stderr = await asyncio.wait_for(
@@ -156,9 +168,12 @@ async def exec_command(
         return f"Action failed: command exited with code {process.returncode}."
         
     except asyncio.TimeoutError:
-        # If the command hangs, we aggressively kill it to free the LangGraph thread
+        # If the command hangs, aggressively kill the entire process group to free resources
         try:
-            process.kill()
+            if os.name == "posix":
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            else:
+                process.kill()
         except ProcessLookupError:
             pass
         timeout_msg = (
