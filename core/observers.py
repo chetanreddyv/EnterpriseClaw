@@ -60,7 +60,7 @@ async def get_browser_environment_state(config: RunnableConfig = None) -> str | 
 
 async def get_exec_environment_state(config: RunnableConfig = None) -> str:
     """Return the latest exec environment state for the active thread."""
-    from mcp_servers.exec_tools import get_exec_environment_state_for_thread
+    from core.exec_sandbox import get_exec_environment_state_for_thread
 
     thread_id = get_thread_id(config, default="default")
     raw_state = get_exec_environment_state_for_thread(thread_id)

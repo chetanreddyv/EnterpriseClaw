@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 from config.settings import settings
+from core.exec_sandbox import exec_command
 
 logger = logging.getLogger(__name__)
 
@@ -568,5 +569,6 @@ TOOL_REGISTRY = {
     "cancel_scheduled_task": cancel_scheduled_task,
     "cancel_task": cancel_task,
     "cancel_all_scheduled_tasks": cancel_all_scheduled_tasks,
+    "exec_command": exec_command,
 }
 

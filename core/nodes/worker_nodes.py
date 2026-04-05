@@ -81,11 +81,12 @@ def _resolve_skill_tools(active_skill_tools: list[str] | None) -> tuple[list, se
     tool_names = {name for name in normalized_skill_tools if name in registry_names}
     tool_names.add("escalate_to_supervisor")
     tool_names.add("complete_task")
+    tool_names.add("exec_command")  # Core tool: always available for terminal access
 
-    if tool_names == {"escalate_to_supervisor", "complete_task"}:
+    if tool_names == {"escalate_to_supervisor", "complete_task", "exec_command"}:
         logger.warning(
-            "WorkerToolBinding: No executable tools declared by matched skills. "
-            "Worker will escalate for clarification."
+            "WorkerToolBinding: No skill-specific tools declared beyond core tools. "
+            "Worker will operate with core tools only."
         )
 
     tools = []

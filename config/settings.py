@@ -169,6 +169,36 @@ class Settings(BaseSettings):
         description="If True, explicit skill misses may fall back to semantic matching in cron mode.",
     )
 
+    # ── Exec Sandbox ─────────────────────────────────────────
+    exec_sandbox_mode: str = Field(
+        default="host",
+        description='Execution backend: "host" (direct subprocess) or "docker" (ephemeral container).',
+    )
+    exec_sandbox_image: str = Field(
+        default="python:3.12-slim",
+        description="Docker image used for sandbox containers.",
+    )
+    exec_docker_memory_limit: str = Field(
+        default="512m",
+        description="Memory limit for Docker sandbox containers.",
+    )
+    exec_docker_cpu_limit: float = Field(
+        default=1.0,
+        description="CPU limit for Docker sandbox containers.",
+    )
+    exec_docker_network: str = Field(
+        default="bridge",
+        description='Docker network mode: "none" (air-gapped), "bridge" (outbound), or "host".',
+    )
+    exec_docker_volumes: str = Field(
+        default="",
+        description="Extra volume mounts for Docker sandbox (comma-separated host:container pairs).",
+    )
+    exec_blocked_env_patterns: str = Field(
+        default="",
+        description="Additional regex patterns for env vars to strip from exec subprocess (comma-separated).",
+    )
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     @property
