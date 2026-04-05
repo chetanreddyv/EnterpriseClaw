@@ -49,6 +49,7 @@ async def delegate_task(
     max_steps: int = settings.worker_max_steps,
     active_model: str = "",
     approved_tools: Optional[List[str]] = None,
+    user_content: str = "",
 ) -> str:
     """
     Delegate a complex, multi-step task to a specialized Worker agent.
@@ -65,6 +66,7 @@ async def delegate_task(
         max_steps (int): Maximum number of action steps before the Worker gives up. Default 15.
         active_model (str): Internal use only.
         approved_tools (list[str] | None): Internal HITL policy directives inherited from Supervisor.
+        user_content (str): Internal use only. Auto-injected raw user message for content fidelity.
     """
     from core.graphs.worker import build_worker_graph
 
@@ -85,24 +87,35 @@ async def delegate_task(
     )
 
     worker_graph = build_worker_graph()
+
+    worker_init: Dict[str, Any] = {
+        "objective": objective,
+        "skill_prompts": "",
+        "active_skills": [],
+        "active_skill_tools": [],
+        "max_steps": max_steps,
+        "step_count": 0,
+        "status": "running",
+        "messages": [],
+        "environment_snapshot": "No environment state yet. Take the first action to observe the environment.",
+        "result_summary": "",
+        "tool_failure_count": 0,
+        "_retry": False,
+        "_formatted_prompt": [],
+        "active_model": active_model,
+        "approved_tools": approved_tools or [],
+    }
+
+    # Content passthrough: attach raw user message for verbatim reproduction tasks.
+    if user_content:
+        worker_init["user_content"] = user_content
+        logger.info(
+            "🔗 Content passthrough: attaching %d chars of raw user content to Worker.",
+            len(user_content),
+        )
+
     result = await worker_graph.ainvoke(
-        {
-            "objective": objective,
-            "skill_prompts": "",
-            "active_skills": [],
-            "active_skill_tools": [],
-            "max_steps": max_steps,
-            "step_count": 0,
-            "status": "running",
-            "messages": [],
-            "environment_snapshot": "No environment state yet. Take the first action to observe the environment.",
-            "result_summary": "",
-            "tool_failure_count": 0,
-            "_retry": False,
-            "_formatted_prompt": [],
-            "active_model": active_model,
-            "approved_tools": approved_tools or [],
-        },
+        worker_init,
         config={"recursion_limit": worker_recursion_limit},
     )
 

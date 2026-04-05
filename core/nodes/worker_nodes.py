@@ -498,6 +498,7 @@ async def worker_skill_context_node(state: WorkerState) -> Dict[str, Any]:
 async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
     """
     Build the Worker prompt from objective + observation + JIT skill context.
+    Includes deterministic content passthrough when user_content is present.
     """
     objective_raw = state.get("objective")
     if isinstance(objective_raw, str):
@@ -517,6 +518,9 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
     active_skills = state.get("active_skills") or []
     skill_prompts = state.get("skill_prompts", "")
 
+    # Content passthrough: raw user message for verbatim reproduction tasks.
+    user_content = (state.get("user_content") or "").strip()
+
     _, resolved_tool_names = _resolve_skill_tools(active_skill_tools)
     available_tool_names = sorted(resolved_tool_names)
     tool_preview = ", ".join(available_tool_names[:24])
@@ -535,6 +539,16 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
         escalation_only_hint = (
             "- No executable skills matched this objective. "
             "Call `escalate_to_supervisor` immediately and request missing context.\n"
+        )
+
+    # Content-fidelity escalation rule: only relevant when user_content is absent
+    content_fidelity_hint = ""
+    if not user_content:
+        content_fidelity_hint = (
+            "- CRITICAL: If the objective requires writing specific file contents, running an exact command, "
+            "or reproducing verbatim text that is NOT provided in your context, you MUST call "
+            "`escalate_to_supervisor` with reason 'Missing verbatim content — cannot reproduce from "
+            "summarized objective.' Do NOT hallucinate or invent placeholder content.\n"
         )
 
     system_prompt = (
@@ -558,6 +572,7 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
         f"- Never guess or invent internal URLs (e.g. going directly to `/cart`) if there are visible UI controls to click instead.\n"
         f"{batch_actions_hint}"
         f"{escalation_only_hint}"
+        f"{content_fidelity_hint}"
         f"- The `Current Environment State` below updates automatically after every action you take. "
         f"Do not use tools only to 'look' at the screen or terminal immediately after an action; "
         f"read the provided state first.\n"
@@ -597,18 +612,40 @@ async def worker_prompt_builder_node(state: WorkerState) -> Dict[str, Any]:
         id="worker_objective_anchor",
     )
 
+    # ── Content Passthrough Block ─────────────────────────────────────────────
+    # When user_content is present, inject it as a dedicated HumanMessage between
+    # the objective and the action history. This ensures the Worker has the raw
+    # user message available for verbatim reproduction tasks (heredocs, file
+    # writes, exact commands) without relying on the LLM to reproduce content
+    # from a summarized objective.
+    content_block: list = []
+    if user_content:
+        content_msg = HumanMessage(
+            content=(
+                "## Original User Message (use this for exact content reproduction)\n"
+                "The following is the EXACT, UNMODIFIED user message. When your objective "
+                "requires writing files, running commands, or reproducing content, use the "
+                "text below VERBATIM — do NOT paraphrase or summarize it.\n\n"
+                f"```\n{user_content}\n```"
+            ),
+            id="worker_user_content_block",
+        )
+        content_block = [content_msg]
+
     logger.info("🌀")
     logger.info("🌀 [WORKER TRACE: PROMPT]")
     logger.info(f"🌀 🎯 Objective: {objective}")
     logger.info(f"🌀 📍 Step: {step_count + 1}/{max_steps} | Model: {state.get('active_model') or 'default'}")
     logger.info(f"🌀 🧩 Active Skills: {state.get('active_skills') or 'None Matched'}")
     logger.info(f"🌀 👁️ Observation: {len(observation)} chars")
+    logger.info(f"🌀 📎 User Content: {len(user_content)} chars" if user_content else "🌀 📎 User Content: none")
     logger.info(f"🌀 📜 History: {len(history)} messages.")
-    logger.info("🌀 📋 Prompt Structure: [System] → [Objective] → [History] → [Observation]")
+    logger.info("🌀 📋 Prompt Structure: [System] → [Objective]%s → [History] → [Observation]",
+                " → [UserContent]" if content_block else "")
     logger.info("🌀")
 
     return {
-        "_formatted_prompt": [sys_msg] + [objective_anchor] + history + [observation_msg],
+        "_formatted_prompt": [sys_msg] + [objective_anchor] + content_block + history + [observation_msg],
         "step_count": step_count + 1,
     }
 

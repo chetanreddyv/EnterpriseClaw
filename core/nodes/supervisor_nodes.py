@@ -490,6 +490,29 @@ async def supervisor_tools_node(state: SupervisorState, config: RunnableConfig) 
                 tool_args["active_model"] = state.get("active_model", "")
                 tool_args["approved_tools"] = state.get("approved_tools", [])
 
+                # ── Deterministic Content Passthrough ──────────────────
+                # Auto-inject the raw user message so the Worker receives
+                # verbatim content without relying on the LLM to reproduce
+                # it in the objective string. This fixes content-loss for
+                # tasks like "write this exact file" or "run this heredoc".
+                if "user_content" not in tool_args or not tool_args["user_content"]:
+                    latest_human_content = ""
+                    for m in reversed(messages):
+                        if isinstance(m, HumanMessage):
+                            raw = m.content
+                            if isinstance(raw, str):
+                                latest_human_content = raw
+                            elif isinstance(raw, list):
+                                text_parts = [
+                                    item.get("text", "")
+                                    for item in raw
+                                    if isinstance(item, dict) and item.get("type") == "text"
+                                ]
+                                latest_human_content = "\n".join(text_parts)
+                            break
+                    if latest_human_content:
+                        tool_args["user_content"] = latest_human_content
+
             if hasattr(func, "ainvoke"):
                 result = await func.ainvoke(tool_args, config=config)
             else:

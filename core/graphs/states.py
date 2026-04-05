@@ -96,6 +96,11 @@ class WorkerState(TypedDict):
     # HITL policy directives inherited from Supervisor
     approved_tools: list[str]
 
+    # Raw user message content for verbatim reproduction tasks.
+    # Injected automatically by supervisor_tools_node from the latest HumanMessage.
+    # The Worker prompt builder surfaces this as a dedicated context block when present.
+    user_content: NotRequired[str]
+
     # Execution context metadata (e.g., interactive vs cron job)
     execution_mode: NotRequired[str]     # "interactive" | "cron"
     execution_source: NotRequired[str]   # free-form source identifier for logging/debug
