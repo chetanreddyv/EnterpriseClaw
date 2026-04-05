@@ -2,9 +2,9 @@
 
 setup:
 	@echo "=> Syncing dependencies with uv..."
-	uv sync
+	uv sync --extra setup
 	@echo "=> Running onboarding wizard..."
-	uv run onboard
+	uv run --extra setup onboard
 
 run:
 	uv run python app.py
