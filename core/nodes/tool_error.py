@@ -28,7 +28,7 @@ def tool_error_node(state: Dict[str, Any]) -> Dict[str, Any]:
             nudge = HumanMessage(content="You generated an empty response with no tool calls. Please try again and provide either a tool call or a text response.")
             return {
                 "tool_failure_count": failures,
-                "_retry": False, # Reset retry flag so it routes to prompt_builder cleanly
+                "_retry": True, # Must be True so route_after_worker_error routes back to prompt_builder
                 "messages": [nudge] 
             }
             
