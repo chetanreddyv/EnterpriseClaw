@@ -357,7 +357,7 @@ def _summarize_tool_result(tool_name: str, result_content: str) -> str:
     if category in {"browser", "exec"}:
         return (
             f"Action dispatched successfully via {tool_name}. "
-            "See environment observation for current state."
+            "IMPORTANT: Command/Action output is NOT here. You MUST read the 'Current Environment State' observation below to see the results."
         )
 
     return summary or f"Action successful: {tool_name}."

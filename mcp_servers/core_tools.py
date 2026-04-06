@@ -50,6 +50,7 @@ async def delegate_task(
     active_model: str = "",
     approved_tools: Optional[List[str]] = None,
     user_content: str = "",
+    config: RunnableConfig = None,
 ) -> str:
     """
     Delegate a complex, multi-step task to a specialized Worker agent.
@@ -116,7 +117,10 @@ async def delegate_task(
 
     result = await worker_graph.ainvoke(
         worker_init,
-        config={"recursion_limit": worker_recursion_limit},
+        config={
+            "recursion_limit": worker_recursion_limit,
+            "configurable": config.get("configurable", {}) if config else {}
+        },
     )
 
     status = result.get("status", "completed")
