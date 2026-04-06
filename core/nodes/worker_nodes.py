@@ -415,6 +415,7 @@ async def worker_refresh_environment_node(state: WorkerState, config: RunnableCo
     }
 
     update: Dict[str, Any] = {"_refresh_categories": []}
+    logger.info(f"WorkerRefresh: Categories to refresh: {categories} from raw: {raw_categories}")
     if not categories:
         return update
 
