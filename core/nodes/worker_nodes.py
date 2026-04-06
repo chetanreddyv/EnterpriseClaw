@@ -317,14 +317,15 @@ def _build_worker_history_tail(messages: list[Any], max_messages: int = 10) -> l
 
 def _tool_category(tool_name: str) -> str:
     """Resolve normalized runtime category for a tool."""
+    if tool_name.startswith("exec_"):
+        return "exec"
+    if tool_name.startswith("browser_") or tool_name == "batch_actions":
+        return "browser"
+
     metadata = GLOBAL_TOOL_METADATA.get(tool_name, {})
     category = str(metadata.get("category", "")).strip().lower()
     if category:
         return category
-    if tool_name.startswith("browser_") or tool_name == "batch_actions":
-        return "browser"
-    if tool_name.startswith("exec_"):
-        return "exec"
     return ""
 
 
